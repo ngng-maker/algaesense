@@ -1,0 +1,21 @@
+# Virtual environments
+.venv/
+venv/
+
+# Python bytecode/cache
+__pycache__/
+*.pyc
+
+# Packaging build artifacts
+*.egg-info/
+dist/
+build/
+
+# Test/tool caches
+.pytest_cache/
+.hypothesis/
+.ruff_cache/
+
+# Locally-generated data (raw sensor Parquet, calibration outputs) --
+# reproducible from a real experiment run, not something to version control.
+data/

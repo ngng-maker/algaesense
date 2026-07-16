@@ -1,0 +1,73 @@
+"""Thin HTTP proxy to one algaesense-edge instance's network API."""
+
+from __future__ import annotations
+
+import httpx
+
+
+"""
+This is the only place in `algaesense-agent` that talks to a Raspberry
+Pi -- and even here, only over the network API algaesense-edge already
+exposes (see algaesense_edge.api.app), never anything hardware-specific.
+`httpx.AsyncClient` accepts an injectable `transport=`, the same
+"swap the real backend for a fake one behind an identical interface"
+pattern used throughout this project (MockLEDHardware,
+MockVOCSensorReader, etc.) -- tests use `httpx.MockTransport` instead of a
+running edge service.
+"""
+
+
+class UnknownReactorError(LookupError):
+    """Raised when the edge service has no actuator configured for the
+    requested reactor_id."""
+
+
+class SetpointRejectedError(ValueError):
+    """Raised when the edge service's own safety validation rejected a
+    requested setpoint."""
+
+    """
+    This mirrors algaesense_edge.actuators.actuators.UnsafeSetpointError
+    one network hop away -- the edge service re-validates every setpoint
+    independent of whatever this client sends, and this exception is just
+    that rejection surfacing back to the caller here, not a duplicate
+    safety check performed on this side.
+    """
+
+
+class EdgeClient:
+    """Talks to one algaesense-edge instance's network API."""
+
+    def __init__(self, base_url: str, timeout: float = 10.0, transport: httpx.AsyncBaseTransport | None = None) -> None:
+        self._client = httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=timeout, transport=transport)
+
+    async def recent_voc_readings(self, limit: int | None = None) -> list[dict]:
+        """Fetch the most recent VOC readings the edge service has buffered."""
+        response = await self._client.get(
+            "/sensors/voc/recent", params={"limit": limit} if limit is not None else None
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def set_led(self, reactor_id: str, par_umol_m2_s: float) -> dict:
+        """Command a reactor's LED to a new PAR setpoint; the edge service
+        validates it before applying anything."""
+
+        response = await self._client.post(
+            f"/actuators/led/{reactor_id}", json={"par_umol_m2_s": par_umol_m2_s}
+        )
+
+        if response.status_code == 404:
+            raise UnknownReactorError(
+                f"algaesense-edge has no LED actuator configured for reactor {reactor_id!r}"
+            )
+
+        if response.status_code == 422:
+            detail = response.json().get("detail", response.text)
+            raise SetpointRejectedError(detail)
+
+        response.raise_for_status()
+        return response.json()
+
+    async def close(self) -> None:
+        await self._client.aclose()

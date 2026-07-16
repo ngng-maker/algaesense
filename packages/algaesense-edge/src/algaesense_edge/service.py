@@ -1,0 +1,151 @@
+"""Ties acquisition (sensor readers, camera capture, Parquet writers) and
+the API's live-reading buffer together into one thing a caller can drive
+one "tick" at a time.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+from dataclasses import dataclass
+from pathlib import Path
+
+from jaxsr_calibration.logging_.schema import CAMERA_RAW_SCHEMA, VOC_RAW_SCHEMA
+
+from algaesense_edge.acquisition.camera import CameraCapture, process_clip
+from algaesense_edge.acquisition.voc import TRHSensorReader, VOCSensorReader
+from algaesense_edge.acquisition.writer import PartitionedParquetWriter
+from algaesense_edge.api.state import AppState
+
+
+"""
+Deliberately exposes `run_voc_tick`/`run_camera_tick` as individually
+callable methods rather than only an internal infinite loop -- that's
+what makes this testable (call a tick a known number of times, inspect
+exactly what happened) instead of only being verifiable by actually
+running it forever on real hardware. `cli.py`'s `start` command is the
+thin wrapper that calls these on a real schedule (once/second, once/hour)
+forever.
+"""
+
+
+@dataclass
+class AcquisitionService:
+    """One instance per (experiment, reactor, sensor, camera): turns
+    hardware readings into raw Parquet rows and live API state, tick by
+    tick."""
+
+    experiment_id: str
+
+    reactor_id: str
+
+    sensor_id: str
+
+    camera_id: str
+
+    voc_reader: VOCSensorReader
+
+    trh_reader: TRHSensorReader
+
+    camera_capture: CameraCapture
+
+    camera_clip_dir: Path
+
+    raw_data_dir: Path
+
+    state: AppState
+
+    camera_capture_duration_s: float = 10.0
+
+    camera_frame_rate_fps: float = 10.0
+
+    lamp_hours: float = 0.0
+
+    light_state: str = "on"
+
+    def __post_init__(self) -> None:
+        self.voc_writer = PartitionedParquetWriter(
+            base_dir=self.raw_data_dir,
+            experiment_id=self.experiment_id,
+            partition_key="sensor_id",
+            partition_value=self.sensor_id,
+            schema=VOC_RAW_SCHEMA,
+        )
+        self.camera_writer = PartitionedParquetWriter(
+            base_dir=self.raw_data_dir,
+            experiment_id=self.experiment_id,
+            partition_key="camera_id",
+            partition_value=self.camera_id,
+            schema=CAMERA_RAW_SCHEMA,
+        )
+        self.camera_clip_dir.mkdir(parents=True, exist_ok=True)
+
+    def run_voc_tick(self, timestamp: dt.datetime) -> dict:
+        """Read the VOC + T/RH sensors once, write the row to Parquet, and
+        make it available to the API's recent-readings buffer."""
+
+        row = {
+            "timestamp": timestamp,
+            "experiment_id": self.experiment_id,
+            "sensor_id": self.sensor_id,
+            "reactor_id": self.reactor_id,
+            "pid_voltage_mv": self.voc_reader.read_voltage_mv(),
+            "sample_t_c": self.trh_reader.read_temperature_c(),
+            "sample_rh_pct": self.trh_reader.read_humidity_pct(),
+            "sample_flow_sccm": None,
+            "pump_pwm": None,
+            "lamp_hours": self.lamp_hours,
+            "reactor_par_umol_m2_s": None,
+            "reactor_temp_c": None,
+            "reactor_od": None,
+            "reactor_ph": None,
+            "light_state": self.light_state,
+            "room_t_c": None,
+            "room_rh_pct": None,
+            "acquisition_status": "OK",
+        }
+        self.voc_writer.write_row(row)
+        self.state.record_voc_reading(row)
+        return row
+
+    def run_camera_tick(self, timestamp: dt.datetime) -> dict:
+        """Record and process one camera clip, write the row to Parquet,
+        and make it available to the API's recent-readings buffer."""
+
+        """
+        Colons aren't valid in Windows filenames, hence the replace --
+        same reasoning as jaxsr_calibration.diagnostics.fleet_zero's
+        run_id.
+        """
+        clip_name = f"{self.camera_id}_{timestamp.isoformat().replace(':', '-')}.mp4"
+        clip_path = self.camera_clip_dir / clip_name
+
+        self.camera_capture.record_clip(
+            duration_s=self.camera_capture_duration_s,
+            frame_rate_fps=self.camera_frame_rate_fps,
+            out_path=clip_path,
+        )
+        features = process_clip(clip_path)
+
+        row = {
+            "timestamp": timestamp,
+            "experiment_id": self.experiment_id,
+            "reactor_id": self.reactor_id,
+            "camera_id": self.camera_id,
+            "video_path": str(clip_path),
+            "capture_duration_s": self.camera_capture_duration_s,
+            "frame_rate_fps": self.camera_frame_rate_fps,
+            "frame_count": features.frame_count,
+            "image_feature_vector": features.rgb,
+            "exposure_us": None,
+            "gain": None,
+            "light_state": self.light_state,
+            "acquisition_status": "OK",
+        }
+        self.camera_writer.write_row(row)
+        self.state.record_camera_reading(row)
+        return row
+
+    def close(self) -> None:
+        """Flush any buffered-but-unwritten rows -- call when acquisition stops."""
+        self.voc_writer.close()
+        self.camera_writer.close()

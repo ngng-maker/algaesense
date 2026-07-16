@@ -1,0 +1,17 @@
+# This is the *workspace root* pyproject.toml. It does not describe an installable
+# package itself -- it just tells `uv` (a fast Python package/venv manager) that this
+# repo contains multiple independent packages living under packages/*, so that
+# `uv` can install/lock them together instead of you `cd`-ing into each one.
+#
+# If you don't have `uv` installed yet, that's fine for now: each package under
+# packages/ also has its own pyproject.toml and can be installed individually with
+# plain `pip install -e packages/jaxsr-calibration`.
+
+[tool.uv.workspace]
+# Every directory matching this glob that contains a pyproject.toml becomes a
+# "workspace member" automatically -- no edit needed here when a new package
+# (like packages/algaesense-edge) is added, as long as it lives under packages/.
+members = ["packages/*"]
+
+# Deliberately no [project] table here: this file configures tooling for the
+# repo as a whole, it does not itself describe an installable Python package.

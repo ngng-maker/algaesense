@@ -1,0 +1,55 @@
+# Example Hermes MCP-server registration for AlgaeSense.
+#
+# Copy the mcp_servers: block below into your own ~/.hermes/config.yaml
+# (merge it with whatever else is already there -- don't just overwrite
+# the file). Every command here assumes algaesense-agent is installed
+# in the same Python environment Hermes runs in (`pip install -e
+# packages/algaesense-agent` from the repo root, or a real release once
+# one exists).
+#
+# Each server is its own stdio subprocess -- Hermes launches it and talks
+# to it over stdin/stdout, no network port involved for any of these.
+
+mcp_servers:
+  algaesense_pipeline:
+    command: "algaesense-mcp-pipeline"
+    env:
+      # Where derived-features Parquet files live, e.g.
+      # data/derived/features/{campaign_id}/{experiment_id}.parquet
+      ALGAESENSE_DATA_DIR: "/path/to/algaesense/data"
+
+  algaesense_actuators:
+    command: "algaesense-mcp-actuators"
+    env:
+      # The algaesense-edge network API this reactor's Raspberry Pi exposes.
+      ALGAESENSE_EDGE_BASE_URL: "http://192.168.1.42:8000"
+
+  algaesense_dashboard:
+    command: "algaesense-mcp-dashboard"
+    env:
+      ALGAESENSE_DATA_DIR: "/path/to/algaesense/data"
+
+  algaesense_labwiki:
+    command: "algaesense-mcp-labwiki"
+    env:
+      ALGAESENSE_LABWIKI_ROOT: "/path/to/algaesense/data/labwiki"
+
+# Slack gateway: these are Hermes's own environment variables, not
+# something algaesense-agent reads directly -- set them in whatever
+# shell/service file starts the Hermes gateway daemon, not here.
+#
+#   SLACK_BOT_TOKEN=xoxb-...
+#   SLACK_ALLOWED_USERS=U012ABC3DEF     # required -- Hermes denies all
+#                                        # messages by default without this
+#   SLACK_HOME_CHANNEL=C012ABC3DEF      # where cron job results post
+#
+# The Slack app also needs the message.channels (and/or message.groups,
+# for private channels) event subscription enabled, or channel messages
+# never reach the gateway at all. See:
+# https://hermes-agent.nousresearch.com/docs/user-guide/messaging/slack
+
+# System prompt: point Hermes's channel-specific config (or
+# --ephemeral-system-prompt for a quick test) at system_prompt.md in this
+# same directory, e.g.:
+#
+#   ephemeral_system_prompt_file: "/path/to/algaesense-agent/src/algaesense_agent/profile/system_prompt.md"

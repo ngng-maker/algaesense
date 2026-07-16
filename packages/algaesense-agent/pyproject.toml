@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "algaesense-agent"
+version = "0.1.0"
+description = "Hermes-based conversational orchestrator: MCP servers wrapping the jaxsr-calibration pipeline and the algaesense-edge actuator API, plus a labwiki knowledge base."
+requires-python = ">=3.11"
+dependencies = [
+    # This package never touches hardware directly and never runs the
+    # numerically heavy JAXSR fit itself except by calling into
+    # jaxsr-calibration's own bridge functions -- reused rather than
+    # reimplemented, same "single source of truth" reasoning as
+    # algaesense-edge depending on jaxsr-calibration for raw schemas.
+    "jaxsr-calibration",
+    "jaxsr",
+    "mcp",
+    "httpx",
+    "pydantic>=2",
+    "pyyaml",
+    "matplotlib",
+    "numpy",
+    "polars",
+]
+
+[project.optional-dependencies]
+# Everything needed to run this package's own test suite (not needed by end users).
+# algaesense-edge is a *test-only* dependency here: the Phase 2 end-to-end
+# test runs its real FastAPI app in-process (via httpx.ASGITransport) as a
+# fake edge service, rather than mocking the HTTP layer -- this package's
+# actual runtime code never imports algaesense_edge.
+dev = ["pytest", "pytest-asyncio", "hypothesis", "algaesense-edge"]
+
+[project.scripts]
+# Two separate console-script entry points because Hermes connects to each
+# MCP server as its own stdio subprocess (per ~/.hermes/config.yaml's
+# mcp_servers: section) -- they are not meant to run inside the same process.
+algaesense-mcp-pipeline = "algaesense_agent.mcp_pipeline.server:main"
+algaesense-mcp-actuators = "algaesense_agent.mcp_actuators.server:main"
+algaesense-mcp-dashboard = "algaesense_agent.dashboard.server:main"
+algaesense-mcp-labwiki = "algaesense_agent.labwiki.server:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/algaesense_agent"]

@@ -1,0 +1,89 @@
+"""Propose/apply actuator-change logic: the actual human-in-the-loop
+safety boundary for this package.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from algaesense_agent.mcp_actuators.edge_client import EdgeClient
+
+
+"""
+Split into two functions on purpose: `propose_led_setpoint` has NO side
+effect (it only describes what would happen), and `apply_led_setpoint` is
+the only function in this whole package that actually reaches hardware.
+The Hermes profile's system prompt (see profile/) is what instructs the
+agent to always call propose, show the human the result in Slack, and
+wait for explicit confirmation before ever calling apply -- but even if
+the agent (or a bug, or a prompt injection) skipped straight to calling
+apply, the request still has to pass algaesense_edge's own independent
+`UnsafeSetpointError` bounds-check before anything physically changes.
+This is defense in depth, not the only layer.
+"""
+
+
+class ActuatorNotImplementedError(NotImplementedError):
+    """Raised for actuator kinds that have no real hardware yet."""
+
+    """
+    Mirrors algaesense_edge.actuators.actuators.TemperatureActuator/
+    StirringActuator, which are themselves unimplemented Protocol stubs --
+    this is that same "not built yet" state, surfaced at the MCP-tool
+    layer with the same honesty rather than pretending the capability
+    exists.
+    """
+
+
+@dataclass
+class ActuatorProposal:
+    """A described, not-yet-applied actuator change."""
+
+    reactor_id: str
+    kind: str
+    requested_value: float
+    unit: str
+    note: str
+
+
+def propose_led_setpoint(reactor_id: str, par_umol_m2_s: float) -> ActuatorProposal:
+    """Describe an LED setpoint change without applying it."""
+
+    """
+    Deliberately makes no network call -- there is nothing to "preview"
+    from the edge service (it has no GET endpoint for a reactor's current
+    LED setpoint), so this just formats the request clearly for whoever
+    is about to approve or reject it in Slack. The real safety check
+    still happens inside `apply_led_setpoint`, on the edge service.
+    """
+    return ActuatorProposal(
+        reactor_id=reactor_id,
+        kind="led_par",
+        requested_value=par_umol_m2_s,
+        unit="umol_m2_s",
+        note=(
+            f"Proposing to set reactor {reactor_id!r}'s LED to {par_umol_m2_s} umol/m^2/s. "
+            "Not yet applied -- requires explicit confirmation before calling apply_led_setpoint."
+        ),
+    )
+
+
+async def apply_led_setpoint(edge: EdgeClient, reactor_id: str, par_umol_m2_s: float) -> dict:
+    """Actually command a reactor's LED to a new setpoint over the network."""
+    return await edge.set_led(reactor_id, par_umol_m2_s)
+
+
+def propose_temperature_setpoint(reactor_id: str, temperature_c: float) -> ActuatorProposal:
+    """Not implemented -- no temperature-control hardware exists yet."""
+    raise ActuatorNotImplementedError(
+        "propose_temperature_setpoint: no temperature-control hardware exists yet "
+        "(see algaesense_edge.actuators.actuators.TemperatureActuator)."
+    )
+
+
+def propose_stirring_setpoint(reactor_id: str, speed_rpm: float) -> ActuatorProposal:
+    """Not implemented -- no stirring-control hardware exists yet."""
+    raise ActuatorNotImplementedError(
+        "propose_stirring_setpoint: no stirring-control hardware exists yet "
+        "(see algaesense_edge.actuators.actuators.StirringActuator)."
+    )

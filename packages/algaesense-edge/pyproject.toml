@@ -1,0 +1,67 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "algaesense-edge"
+version = "0.1.0"
+description = "Raspberry Pi hardware I/O service: sensor acquisition (VOC PID, camera) and actuator control (LED, with future temperature/stirring), exposed over a small network API."
+requires-python = ">=3.11"
+dependencies = [
+    # Reuses jaxsr-calibration's raw schemas (VOC_RAW_SCHEMA, CAMERA_RAW_SCHEMA)
+    # rather than redefining them here -- one source of truth for "what a row
+    # of sensor data looks like", shared by both the Pi (which writes it) and
+    # the brain machine (which reads it).
+    "jaxsr-calibration",
+    "numpy",
+    "pyarrow",
+    "polars",
+    "pydantic>=2",
+    "pyyaml",
+    "click",
+    # The network API is this package's whole reason for existing (the brain
+    # machine talks to the Pi through it) -- unlike jaxsr-calibration's optional
+    # extras, there's no real "I don't want the API" use case for this package.
+    "fastapi",
+    "uvicorn",
+    "httpx",  # FastAPI's own recommended test client dependency
+    # opencv-python (cv2) is used for turning a recorded video clip into a
+    # per-frame RGB feature vector -- unlike the I2C/camera-capture hardware
+    # drivers below, this is genuinely cross-platform (installs and runs fine
+    # on a normal dev machine, not just a Pi), so it's a core dependency: it
+    # lets the clip-PROCESSING logic be real, tested code even without a Pi,
+    # while clip-CAPTURE (operating the physical camera) stays hardware-gated.
+    "opencv-python",
+]
+
+# `pip install algaesense-edge[hardware]` pulls these in ADDITION to the list
+# above. All of these are Raspberry-Pi-only (they either need real I2C/GPIO
+# hardware to even import successfully, or -- for picamera2 -- a real camera
+# module) and won't install/import on a generic dev machine, same reasoning
+# as jaxsr-calibration's own [hardware] extra. Concrete hardware choices
+# (see acquisition/voc.py, acquisition/camera.py, actuators/led.py for the
+# reasoning): ADS1115 for the VOC sensor's ADC, BME280 for T/RH, picamera2
+# for the camera, gpiozero for LED PWM control -- all extremely common,
+# well-documented choices for a Raspberry Pi project, picked so this package
+# is actually usable out of the box rather than waiting on hardware
+# decisions indefinitely.
+[project.optional-dependencies]
+hardware = [
+    "adafruit-circuitpython-ads1x15",
+    "adafruit-circuitpython-bme280",
+    "picamera2",
+    "gpiozero",
+    "smbus2",
+]
+dev = ["pytest", "hypothesis"]
+
+[project.scripts]
+algaesense-edge = "algaesense_edge.cli:cli"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["hardware: requires real sensor/camera hardware, skipped by default"]
+addopts = "-m 'not hardware'"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/algaesense_edge"]

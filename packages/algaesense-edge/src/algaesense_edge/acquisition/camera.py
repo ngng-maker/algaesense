@@ -1,0 +1,233 @@
+"""Camera clip capture and processing."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Protocol
+
+import cv2
+import numpy as np
+
+
+"""
+Split into two halves with very different testability, same reasoning as
+voc.py: PROCESSING a recorded clip into a feature vector uses
+opencv-python (cv2), which is genuinely cross-platform and installs fine
+on a normal dev machine -- so that half is real, tested code. CAPTURING a
+clip from the actual physical camera needs picamera2, which is
+Raspberry-Pi-only, so that half is a mockable interface with a real mock
+and a clearly-labeled hardware placeholder, same pattern as the VOC/T-RH
+sensor readers.
+"""
+
+
+@dataclass
+class ClipFeatures:
+    """The result of processing one recorded clip."""
+
+    """
+    Its per-frame-averaged [red, green, blue] feature vector (matching
+    jaxsr_calibration.logging_.schema.CAMERA_RAW_SCHEMA's fixed column
+    order) plus how many frames actually contributed to that average.
+    """
+
+    rgb: list[float]
+
+    frame_count: int
+
+
+def process_clip(video_path: Path) -> ClipFeatures:
+    """Open a recorded video clip and compute its MEAN [red, green, blue]
+    feature vector."""
+
+    """
+    Averaged across every frame -- the "mean across frames" decision made
+    earlier for how a clip's many frames collapse into the one feature
+    vector CAMERA_RAW_SCHEMA stores per capture.
+    """
+
+    """
+    `cv2.VideoCapture` opens a video file for reading, frame by frame --
+    conceptually similar to opening a text file and reading it line by
+    line, except each "line" here is a full image (a numpy array).
+    """
+    capture = cv2.VideoCapture(str(video_path))
+    if not capture.isOpened():
+        raise ValueError(f"process_clip: could not open video file at {video_path}")
+
+    """
+    Accumulate a running sum (not a running mean) across frames, and
+    divide once at the end -- simpler and no less accurate than updating a
+    mean incrementally, and we don't know the frame count in advance
+    without a separate (sometimes unreliable) metadata read.
+    """
+    channel_sums = np.zeros(3, dtype=np.float64)
+    frame_count = 0
+
+    try:
+        while True:
+            """
+            `capture.read()` returns (success, frame). `frame` is a
+            (height, width, 3) array of pixel values; `success` is False
+            once there are no more frames (or the file couldn't be read),
+            which is how this loop knows when to stop -- no need to know
+            the total frame count ahead of time.
+            """
+            got_frame, frame = capture.read()
+            if not got_frame:
+                break
+
+            """
+            OpenCV reads color channels in BGR order (blue, green, red) --
+            a long-standing OpenCV quirk, not a mistake -- so frame[:, :,
+            0] is blue, not red. `.mean(axis=(0, 1))` averages over every
+            pixel's row and column, leaving one value per color channel: a
+            single [mean_blue, mean_green, mean_red] triple summarizing
+            this one frame.
+            """
+            channel_sums += frame.mean(axis=(0, 1))
+            frame_count += 1
+    finally:
+        """
+        Always release the capture handle, even if something above raised
+        -- same reasoning as SMBus.close() in jaxsr_calibration's scan_i2c.
+        """
+        capture.release()
+
+    if frame_count == 0:
+        raise ValueError(f"process_clip: {video_path} contains no readable frames")
+
+    mean_bgr = channel_sums / frame_count
+
+    """
+    Reorder BGR -> [red, green, blue] here, once, at the boundary where
+    OpenCV's convention meets this project's fixed convention (matching
+    CAMERA_RAW_SCHEMA and
+    jaxsr_calibration.camera.calibration.greenness_index) -- so nothing
+    downstream of this function ever has to think about BGR vs RGB again.
+    """
+    mean_rgb = [float(mean_bgr[2]), float(mean_bgr[1]), float(mean_bgr[0])]
+
+    return ClipFeatures(rgb=mean_rgb, frame_count=frame_count)
+
+
+class CameraCapture(Protocol):
+    """Anything that can record a video clip of a given length to a file."""
+
+    def record_clip(self, duration_s: float, frame_rate_fps: float, out_path: Path) -> Path:
+        """Record for `duration_s` seconds at `frame_rate_fps`, writing the
+        result to `out_path`, and return that same path."""
+        ...
+
+
+@dataclass
+class MockCameraCapture:
+    """A `CameraCapture` that writes a synthetic, solid-color clip instead
+    of using a real camera."""
+
+    """
+    Lets capture-then-process be tested end to end (write a known clip,
+    read it back, confirm the recovered color matches) on any machine, no
+    camera hardware required.
+    """
+
+    color_bgr: tuple[int, int, int] = (120, 150, 100)
+
+    resolution_wh: tuple[int, int] = (64, 64)
+
+    def record_clip(self, duration_s: float, frame_rate_fps: float, out_path: Path) -> Path:
+        n_frames = max(1, round(duration_s * frame_rate_fps))
+        width, height = self.resolution_wh
+
+        """
+        `VideoWriter_fourcc` packs a 4-character video codec tag ("mp4v")
+        into the single integer VideoWriter expects -- "fourcc" (four
+        character code) is the standard name for this kind of codec
+        identifier across video libraries, not something specific to
+        OpenCV.
+        """
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(str(out_path), fourcc, frame_rate_fps, (width, height))
+
+        """
+        `np.full((height, width, 3), color_bgr, dtype=np.uint8)` builds one
+        solid-color frame: every pixel gets the same [B, G, R] value.
+        `dtype=np.uint8` matters -- video frames are 8-bit-per-channel
+        (0-255), and OpenCV expects that exact type, not numpy's default
+        float64.
+        """
+        frame = np.full((height, width, 3), self.color_bgr, dtype=np.uint8)
+        for _ in range(n_frames):
+            writer.write(frame)
+        writer.release()
+
+        return out_path
+
+
+@dataclass
+class Picamera2CameraCapture:
+    """Real `CameraCapture` backed by the Raspberry Pi camera module, via
+    `picamera2` (this package's `[hardware]` extra)."""
+
+    """
+    picamera2 is the current standard library for the Pi camera (it
+    replaced the older, now-deprecated `picamera`).
+
+    Honesty note, same as voc.py's hardware readers: this uses picamera2's
+    standard, documented recording pattern (`Picamera2` + `H264Encoder` +
+    `start_recording`/`stop_recording`), but can't be run or verified
+    without real Pi camera hardware. One thing to double-check once real
+    hardware is available: picamera2 writes a raw H.264 elementary
+    stream, which `process_clip` (via cv2.VideoCapture) may or may not
+    open directly depending on the OpenCV build's codec support -- if not,
+    remux it into an .mp4 container (e.g. with `ffmpeg -i clip.h264 -c
+    copy clip.mp4`) before calling `process_clip`.
+    """
+
+    resolution_wh: tuple[int, int] = (640, 480)
+
+    def record_clip(self, duration_s: float, frame_rate_fps: float, out_path: Path) -> Path:
+        try:
+            from picamera2 import Picamera2
+            from picamera2.encoders import H264Encoder
+        except ImportError as exc:
+            raise ImportError(
+                "Picamera2CameraCapture requires the 'hardware' extra "
+                "(picamera2). Install with `pip install algaesense-edge[hardware]` "
+                "on a Raspberry Pi with a camera module attached."
+            ) from exc
+
+        import time
+
+        camera = Picamera2()
+
+        """
+        `create_video_configuration` builds the settings dict picamera2
+        needs before it can start capturing -- resolution comes from
+        self.resolution_wh (set to match CameraConfig.resolution_wh,
+        jaxsr_calibration.camera.config, when this is constructed).
+        `controls={"FrameRate": ...}` is picamera2's documented way to
+        request a specific capture frame rate (matching
+        CameraConfig.frame_rate_fps) rather than leaving it at whatever the
+        sensor's default is.
+        """
+        video_config = camera.create_video_configuration(
+            main={"size": self.resolution_wh}, controls={"FrameRate": frame_rate_fps}
+        )
+        camera.configure(video_config)
+        encoder = H264Encoder()
+
+        try:
+            camera.start_recording(encoder, str(out_path))
+            time.sleep(duration_s)
+        finally:
+            camera.stop_recording()
+
+        return out_path
+
+
+def create_hardware_camera_capture() -> CameraCapture:
+    """Construct the real picamera2-backed camera capture (see
+    `Picamera2CameraCapture`)."""
+    return Picamera2CameraCapture()

@@ -1,0 +1,70 @@
+[build-system]
+# hatchling is the actual tool that turns this source tree into an installable
+# wheel/sdist. "requires" lists what pip needs to download *before* it can even
+# read the rest of this file's build instructions.
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "jaxsr-calibration"
+version = "0.1.0"
+description = "Pre-experimental sensor calibration, diagnostics, and preprocessing pipeline for JAXSR, covering PID VOC sensors and camera-based biomass estimation."
+requires-python = ">=3.11"
+# These are ALWAYS installed when someone does `pip install jaxsr-calibration`,
+# because every one of them is needed just to import the package's core modules
+# (config parsing, schema definitions, math). Hardware drivers and the dashboard
+# are deliberately NOT here -- see [project.optional-dependencies] below.
+dependencies = [
+    "jaxsr",
+    "numpy",
+    "scipy",
+    "pandas",
+    "polars",
+    "pyarrow",
+    "statsmodels",
+    "pydantic>=2",
+    "pyyaml",
+    "click",
+]
+
+# `pip install jaxsr-calibration[hardware]` pulls these in ADDITION to the list
+# above. Kept separate because smbus2/pyserial only matter on a machine that's
+# physically wired to sensors (e.g. the Raspberry Pi) -- a laptop just analyzing
+# already-collected data has no use for them and shouldn't be forced to install
+# packages that may not even build on non-Linux/non-Pi machines.
+[project.optional-dependencies]
+hardware = ["smbus2", "pyserial"]
+dashboard = ["streamlit"]
+# Everything needed to run this package's own test suite (not needed by end users).
+dev = ["pytest", "hypothesis"]
+
+[project.scripts]
+# This line is what makes `jaxsr-cal` a runnable command after installation.
+# Format is "command-name = "python.module.path:function_to_call"".
+# We use "jaxsr-cal" rather than the spec's plain "jaxsr" to avoid ever
+# colliding with a console-script upstream `jaxsr` might register itself --
+# since jaxsr_calibration is its own separate package (not merged into jaxsr's
+# namespace), we can't assume we "own" the plain `jaxsr` command name.
+jaxsr-cal = "jaxsr_calibration.cli:cli"
+
+[tool.pytest.ini_options]
+# Tells pytest where to look for tests when run from this package's directory,
+# and marks the "hardware" marker as a recognized custom marker (per spec Part
+# XIV's hardware-in-loop tier) so pytest doesn't warn about an "unknown mark"
+# once tests start using @pytest.mark.hardware in later milestones.
+testpaths = ["tests"]
+markers = ["hardware: requires real sensor hardware, skipped by default"]
+# `-m "not hardware"` is the actual mechanism that makes hardware-in-loop
+# tests "skipped by default" (spec Part XIV) -- without this, pytest would
+# still *collect and run* @pytest.mark.hardware tests on every normal `pytest`
+# invocation, marker or no marker. To run them deliberately on real hardware,
+# override this default: `pytest -m hardware`.
+addopts = "-m 'not hardware'"
+
+[tool.hatch.build.targets.wheel]
+# Tells hatchling where the actual importable package source lives, since we're
+# using the "src layout" (source code under src/, not directly at repo root).
+# This prevents a common footgun where `import jaxsr_calibration` accidentally
+# succeeds during development by picking up the source directory itself rather
+# than the installed package, masking packaging bugs.
+packages = ["src/jaxsr_calibration"]
