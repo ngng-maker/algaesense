@@ -44,8 +44,6 @@ class AcquisitionService:
 
     voc_reader: VOCSensorReader
 
-    trh_reader: TRHSensorReader
-
     camera_capture: CameraCapture
 
     camera_clip_dir: Path
@@ -53,6 +51,14 @@ class AcquisitionService:
     raw_data_dir: Path
 
     state: AppState
+
+    """
+    Optional: no T/RH sensor is wired up on this rig yet. When absent,
+    `run_voc_tick` records null `sample_t_c`/`sample_rh_pct` -- fields
+    VOC_RAW_SCHEMA already allows to be null for exactly this reason (not
+    every rig has every ancillary sensor).
+    """
+    trh_reader: TRHSensorReader | None = None
 
     camera_capture_duration_s: float = 10.0
 
@@ -89,8 +95,8 @@ class AcquisitionService:
             "sensor_id": self.sensor_id,
             "reactor_id": self.reactor_id,
             "pid_voltage_mv": self.voc_reader.read_voltage_mv(),
-            "sample_t_c": self.trh_reader.read_temperature_c(),
-            "sample_rh_pct": self.trh_reader.read_humidity_pct(),
+            "sample_t_c": self.trh_reader.read_temperature_c() if self.trh_reader is not None else None,
+            "sample_rh_pct": self.trh_reader.read_humidity_pct() if self.trh_reader is not None else None,
             "sample_flow_sccm": None,
             "pump_pwm": None,
             "lamp_hours": self.lamp_hours,

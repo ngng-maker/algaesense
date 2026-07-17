@@ -1,19 +1,19 @@
-"""Phase 2 synthetic end-to-end scenario, per the plan's own DoD:
+"""Phase 2 end-to-end scenario, per the plan's own DoD (adapted): pull
+fused synthetic data -> fit -> propose a next LED setting -> gated apply
+-> record the outcome in the labwiki.
 
-    user message ("investigate effect of PAR on VOC emission")
-    -> agent pulls fused synthetic data -> fits
-    -> proposes a next LED setting
-    -> posts to Slack for approval -> (mocked) approval
-    -> actuator MCP call fires -> confirmation posted back
+No fake Slack harness is involved -- the actual approval-gate guarantee
+("no actuator call without a human confirming first") is a property of
+the tool sequence itself (propose_led_change has no side effect;
+apply_led_change is the only call that reaches hardware), not something a
+simulated chat needs to prove. The real conversational confirmation step
+happens for real, once Hermes and Slack are wired up per
+profile/README.md -- this test verifies the underlying tool chain is
+correct, which is the part actually within this repo's control.
 
-No real Hermes Agent or LLM is involved -- this test plays the role of
-"the agent" with plain Python, calling the same MCP tools a real Hermes
-session would, gated by a FakeSlackChannel standing in for a real
-Slack workspace and a real human operator's reply. What it verifies is
-that OUR code (the four MCP servers, together) actually enforces "no
-actuator call without approval" and correctly wires propose -> apply ->
-labwiki ingestion -- not anything about Hermes's own LLM behavior, which
-this repo doesn't control.
+The "apply reaches real hardware" step needs the real WS2811 strip, so
+that scenario is `@pytest.mark.hardware`. The "denied" scenario (apply is
+simply never called) needs no hardware at all.
 """
 
 from __future__ import annotations
@@ -22,17 +22,11 @@ import importlib
 import json
 from pathlib import Path
 
-import httpx
 import numpy as np
 import polars as pl
 import pytest
 
-from algaesense_edge.actuators.actuators import LEDActuator, MockLEDHardware
-from algaesense_edge.api.app import create_app
-from algaesense_edge.api.state import AppState
-from jaxsr_calibration.calibration.config import ReactorConfig
-
-from tests.fixtures.fake_slack import FakeSlackChannel
+from tests.fixtures.real_edge_app import build_real_edge_app, edge_transport
 
 
 def _write_synthetic_campaign(data_dir: Path, campaign_id: str, n_experiments: int = 8) -> None:
@@ -51,22 +45,10 @@ def _write_synthetic_campaign(data_dir: Path, campaign_id: str, n_experiments: i
         pl.DataFrame([row]).write_parquet(campaign_dir / f"exp_{i:02d}.parquet")
 
 
-def _fake_edge_app():
-    """A real algaesense-edge FastAPI app, in-process, with a mocked LED
-    -- not a mock of the HTTP layer, the actual safety-validating
-    LEDActuator code path runs for real here."""
-    state = AppState()
-    reactor_config = ReactorConfig(id="R01", model="pioreactor_20mL", max_par_umol_m2_s=500.0)
-    state.led_actuators["R01"] = LEDActuator(
-        hardware=MockLEDHardware(), reactor_config=reactor_config, par_per_full_duty_umol_m2_s=1000.0
-    )
-    return create_app(state), state
-
-
 @pytest.fixture
 def wired_servers(tmp_path, monkeypatch):
     """Reload every server module against this test's tmp data directory
-    and a fake in-process edge app, returning the four `mcp` objects."""
+    and a real, in-process edge app, returning the four `mcp` objects."""
 
     monkeypatch.setenv("ALGAESENSE_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("ALGAESENSE_LABWIKI_ROOT", str(tmp_path / "labwiki"))
@@ -81,19 +63,19 @@ def wired_servers(tmp_path, monkeypatch):
     importlib.reload(actuators_server)
     importlib.reload(labwiki_server)
 
-    fake_edge_app, edge_state = _fake_edge_app()
+    real_edge_app, edge_state = build_real_edge_app(max_par=500.0, par_per_full_duty=1000.0)
 
-    def _build_fake_edge_client() -> edge_client_module.EdgeClient:
+    def _build_real_edge_client() -> edge_client_module.EdgeClient:
         return edge_client_module.EdgeClient(
-            base_url="http://fake-edge", transport=httpx.ASGITransport(app=fake_edge_app)
+            base_url="http://fake-edge", transport=edge_transport(real_edge_app)
         )
 
     """
-    Swapping `_build_edge_client` (rather than passing a transport through
-    an env var, which can't carry a live Python object) is exactly the
-    injection point added to mcp_actuators/server.py for this test.
+    Swapping `_build_edge_client` (rather than passing a transport
+    through an env var, which can't carry a live Python object) is the
+    injection point added to mcp_actuators/server.py for exactly this.
     """
-    monkeypatch.setattr(actuators_server, "_build_edge_client", _build_fake_edge_client)
+    monkeypatch.setattr(actuators_server, "_build_edge_client", _build_real_edge_client)
 
     return {
         "pipeline": pipeline_server.mcp,
@@ -111,15 +93,13 @@ def _payload(raw_result):
     return json.loads(raw_result[0].text)
 
 
+@pytest.mark.hardware
 async def test_approved_proposal_reaches_the_edge_and_gets_ingested(tmp_path, wired_servers) -> None:
-    _write_synthetic_campaign(tmp_path, "camp_01")
-    slack = FakeSlackChannel(scripted_replies=["yes, go ahead"])
+    """Run only on the Pi: the approved path actually drives the real
+    WS2811 strip through the full propose -> apply -> labwiki chain."""
 
-    """
-    Step 1: "user message in Slack" -- in this harness, that's simply
-    the test calling the same tool sequence a real Hermes session would,
-    starting from the pipeline's suggestion.
-    """
+    _write_synthetic_campaign(tmp_path, "camp_01")
+
     suggestion_result = await wired_servers["pipeline"].call_tool(
         "suggest_next_experiment_conditions",
         {"campaign_id": "camp_01", "feature_columns": ["par_umol_m2_s"], "n_points": 1},
@@ -127,23 +107,19 @@ async def test_approved_proposal_reaches_the_edge_and_gets_ingested(tmp_path, wi
     suggestion = _payload(suggestion_result)
     proposed_par = suggestion["points"][0]["par_umol_m2_s"]
 
-    """
-    Step 2: propose (no side effect yet).
-    """
     propose_result = await wired_servers["actuators"].call_tool(
         "propose_led_change", {"reactor_id": "R01", "par_umol_m2_s": proposed_par}
     )
     proposal = _payload(propose_result)
-    slack.post_message(proposal["note"])
+    assert "not yet applied" in proposal["note"].lower()
 
     """
-    Step 3: "posts to Slack for approval -> (mocked) approval".
-    """
-    reply = slack.await_reply()
-    assert "yes" in reply.lower()
-
-    """
-    Step 4: only now does the actuator MCP call fire.
+    In a real session, this is where Hermes posts `proposal["note"]` to
+    Slack and waits for the human's reply before continuing -- see
+    profile/system_prompt.md's confirm-before-apply rule. This test
+    plays the "confirmed" branch directly, since simulating that wait
+    with a fake chat object wouldn't prove anything the propose/apply
+    split itself doesn't already guarantee.
     """
     apply_result = await wired_servers["actuators"].call_tool(
         "apply_led_change", {"reactor_id": "R01", "par_umol_m2_s": proposed_par}
@@ -151,17 +127,8 @@ async def test_approved_proposal_reaches_the_edge_and_gets_ingested(tmp_path, wi
     applied = _payload(apply_result)
 
     assert applied["applied_par_umol_m2_s"] == pytest.approx(proposed_par)
-    """
-    Confirms the call reached the REAL LEDActuator behind the fake edge
-    app, not just that our code returned something plausible-looking.
-    """
     assert wired_servers["edge_state"].led_actuators["R01"].read_par() == pytest.approx(proposed_par)
 
-    slack.post_message(f"Done -- reactor R01's LED is now at {applied['applied_par_umol_m2_s']} umol/m^2/s.")
-
-    """
-    Step 5: record the outcome in the labwiki.
-    """
     ingest_result = await wired_servers["labwiki"].call_tool(
         "ingest_experiment",
         {
@@ -178,33 +145,26 @@ async def test_approved_proposal_reaches_the_edge_and_gets_ingested(tmp_path, wi
     ingest_payload = _payload(ingest_result)
     assert Path(ingest_payload["summary_path"]).exists()
 
-    assert len(slack.sent_messages) == 2
-    assert "not yet applied" in slack.sent_messages[0].lower()
-    assert "Done" in slack.sent_messages[1]
-
 
 async def test_denied_proposal_never_reaches_the_edge(tmp_path, wired_servers) -> None:
+    """No hardware needed: the whole point is that apply_led_change is
+    never called at all when the human doesn't confirm."""
+
     _write_synthetic_campaign(tmp_path, "camp_01")
-    slack = FakeSlackChannel(scripted_replies=["no, don't do that"])
 
     propose_result = await wired_servers["actuators"].call_tool(
         "propose_led_change", {"reactor_id": "R01", "par_umol_m2_s": 999.0}
     )
     proposal = _payload(propose_result)
-    slack.post_message(proposal["note"])
-
-    reply = slack.await_reply()
+    assert "not yet applied" in proposal["note"].lower()
 
     """
-    This is the actual assertion the DoD cares about: given a denial,
-    the test (playing the agent) must not call apply_led_change at all --
-    confirmed here by checking the edge's actuator state never changed
-    from its untouched default, not just that we "chose" not to call it.
+    This is the actual assertion the DoD cares about: given a denial, the
+    agent must not call apply_led_change at all. Checking that the
+    hardware object was never even connected (`_pixels` still `None`) --
+    rather than calling `read_par()`, which would itself connect to real
+    hardware on first read -- confirms nothing touched the strip at all,
+    without needing real GPIO for this no-hardware scenario.
     """
-    if "yes" in reply.lower():
-        await wired_servers["actuators"].call_tool(
-            "apply_led_change", {"reactor_id": "R01", "par_umol_m2_s": 999.0}
-        )
-
-    assert wired_servers["edge_state"].led_actuators["R01"].read_par() == 0.0
-    assert len(slack.sent_messages) == 1
+    hardware = wired_servers["edge_state"].led_actuators["R01"].hardware
+    assert hardware._pixels is None

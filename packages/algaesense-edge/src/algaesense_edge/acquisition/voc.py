@@ -1,4 +1,4 @@
-"""VOC PID sensor (and its companion T/RH sensor) reading."""
+"""VOC PID sensor (and optional companion T/RH sensor) reading."""
 
 from __future__ import annotations
 
@@ -7,21 +7,28 @@ from typing import Protocol
 
 
 """
-The exact ADC chip and T/RH sensor model were left as open ⚠️ hardware
-decisions in the original spec ("ADS1115 or MCP3428"; "SHT35 or BME280")
-and never resolved. Since this package needs to be genuinely installable
-and usable on a real Pi right away, this module commits to concrete,
-well-documented defaults rather than waiting indefinitely: an ADS1115 ADC
-and a BME280 T/RH sensor, both extremely common on Raspberry Pi projects,
-each with a stable, actively-maintained Adafruit CircuitPython driver.
+Confirmed real hardware (2026-07-16): an Alphasense PID sensor with its
+ISB (Individual Sensor Board) for signal conditioning, outputting an
+analog 0-3.3V signal -- read via an ADS1115 ADC (Adafruit STEMMA QT
+variant) over I2C at address 0x48 (its default when ADDR is tied to
+GND/floating, confirmed via i2cdetect), single-ended on channel 0 (A0).
+
+A companion T/RH sensor is not yet acquired -- `TRHSensorReader` stays
+optional everywhere it's used (service.py, cli.py); a row with no T/RH
+reading simply has `sample_t_c`/`sample_rh_pct` as null, which
+VOC_RAW_SCHEMA already supports (see jaxsr_calibration.logging_.schema --
+those fields are nullable precisely because not every rig has every
+ancillary sensor). `Bme280TRHSensorReader` below is a real, ready-to-use
+driver for when a BME280 is wired up later, not a placeholder.
 
 Honesty note: these real-hardware code paths cannot be run or verified on
 a non-Pi dev machine (`board`/`busio`, from Adafruit Blinka, only work on
 actual supported single-board-computer hardware) -- they're built against
-each library's well-known, standard, widely-documented usage pattern, but
-are untested here by nature, same situation as jaxsr_calibration's own
-scan_i2c. They're marked `@pytest.mark.hardware` and skipped by default;
-the mock readers below remain the fully-tested path for everything else.
+each library's well-known, standard, widely-documented usage pattern, and
+against this project's own confirmed wiring, but are untested on this dev
+machine by nature, same situation as jaxsr_calibration's own scan_i2c.
+They're marked `@pytest.mark.hardware` and skipped by default here; only
+run for real on the Pi itself.
 """
 
 
@@ -41,37 +48,6 @@ class TRHSensorReader(Protocol):
 
 
 @dataclass
-class MockVOCSensorReader:
-    """A `VOCSensorReader` that always returns a fixed (or externally
-    updated) voltage."""
-
-    """
-    Used for local development and tests on any machine, with no real
-    hardware involved.
-    """
-
-    voltage_mv: float = 0.0
-
-    def read_voltage_mv(self) -> float:
-        return self.voltage_mv
-
-
-@dataclass
-class MockTRHSensorReader:
-    """A `TRHSensorReader` counterpart to MockVOCSensorReader."""
-
-    temperature_c: float = 25.0
-
-    humidity_pct: float = 50.0
-
-    def read_temperature_c(self) -> float:
-        return self.temperature_c
-
-    def read_humidity_pct(self) -> float:
-        return self.humidity_pct
-
-
-@dataclass
 class Ads1115VOCSensorReader:
     """Real `VOCSensorReader` backed by an ADS1115 ADC over I2C, via the
     `adafruit-circuitpython-ads1x15` library."""
@@ -80,10 +56,12 @@ class Ads1115VOCSensorReader:
     Part of this package's `[hardware]` extra -- NOT hand-rolled I2C
     register writes.
 
-    The PID sensor's analog output connects to one of the ADS1115's four
-    input channels (`channel`, 0-3); `i2c_address` defaults to the chip's
-    standard address (0x48 when its ADDR pin is tied to ground, the most
-    common wiring).
+    The Alphasense PID's ISB output connects to the ADS1115's channel 0
+    (A0), single-ended (the ISB's 0V signal return goes to GND, not a
+    second ADS1115 input) -- `channel` stays configurable in case a future
+    rig wires it elsewhere, but 0 is this project's actual, tested wiring.
+    `i2c_address` defaults to 0x48, this ADS1115 board's confirmed address
+    (ADDR pin tied to GND).
     """
 
     i2c_address: int = 0x48
@@ -111,10 +89,10 @@ class Ads1115VOCSensorReader:
         pattern, for the same reason: these are Pi-only dependencies.
         """
         try:
-            import adafruit_ads1x15.ads1115 as ads1115_module
             import board
             import busio
             from adafruit_ads1x15.analog_in import AnalogIn
+            from adafruit_ads1x15.ads1115 import ADS1115
         except ImportError as exc:
             raise ImportError(
                 "Ads1115VOCSensorReader requires the 'hardware' extra "
@@ -123,15 +101,17 @@ class Ads1115VOCSensorReader:
             ) from exc
 
         i2c = busio.I2C(board.SCL, board.SDA)
-        ads = ads1115_module.ADS1115(i2c, address=self.i2c_address)
+        ads = ADS1115(i2c, address=self.i2c_address)
 
         """
-        ADS1115's four input channels are addressed via constants P0-P3;
-        `getattr(ads1115_module, f"P{n}")` looks up the right one from
-        `self.channel` without needing a 4-branch if/elif chain.
+        `AnalogIn(ads, self.channel)` takes the channel directly as a
+        plain integer (0-3) -- confirmed working against real hardware.
+        The library's `P0`-style module constants are just aliases for
+        these same integers; passing the int directly avoids an
+        unnecessary `getattr` lookup for something that was never
+        anything but a plain channel number.
         """
-        channel_pin = getattr(ads1115_module, f"P{self.channel}")
-        self._analog_in = AnalogIn(ads, channel_pin)
+        self._analog_in = AnalogIn(ads, self.channel)
 
     def read_voltage_mv(self) -> float:
         if self._analog_in is None:
@@ -148,13 +128,14 @@ class Ads1115VOCSensorReader:
 @dataclass
 class Bme280TRHSensorReader:
     """Real `TRHSensorReader` backed by a BME280 over I2C, via the
-    `adafruit-circuitpython-bme280` library."""
+    `adafruit-circuitpython-bme280` library. Not yet wired up on this
+    rig -- ready to use the moment one is."""
 
     """
     0x76 is BME280's default address when its SDO pin is tied to ground
     (the more common wiring); some breakout boards default to 0x77
     instead -- check the specific board's datasheet if 0x76 doesn't
-    respond.
+    respond, once this sensor is actually connected.
     """
 
     i2c_address: int = 0x76
@@ -199,5 +180,7 @@ def create_hardware_voc_reader(i2c_address: int = 0x48, channel: int = 0) -> VOC
 
 def create_hardware_trh_reader(i2c_address: int = 0x76) -> TRHSensorReader:
     """Construct the real BME280-backed T/RH sensor reader (see
-    `Bme280TRHSensorReader`)."""
+    `Bme280TRHSensorReader`). Only call this once a BME280 is actually
+    wired up -- until then, run without a T/RH reader at all (see
+    service.py/cli.py's `trh_reader: TRHSensorReader | None`)."""
     return Bme280TRHSensorReader(i2c_address=i2c_address)

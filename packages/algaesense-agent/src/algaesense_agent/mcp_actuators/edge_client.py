@@ -9,11 +9,11 @@ import httpx
 This is the only place in `algaesense-agent` that talks to a Raspberry
 Pi -- and even here, only over the network API algaesense-edge already
 exposes (see algaesense_edge.api.app), never anything hardware-specific.
-`httpx.AsyncClient` accepts an injectable `transport=`, the same
-"swap the real backend for a fake one behind an identical interface"
-pattern used throughout this project (MockLEDHardware,
-MockVOCSensorReader, etc.) -- tests use `httpx.MockTransport` instead of a
-running edge service.
+`httpx.AsyncClient` accepts an injectable `transport=`, which is what lets
+tests run this against a real, in-process algaesense-edge FastAPI app via
+`httpx.ASGITransport` (see tests/fixtures/real_edge_app.py) instead of a
+separately running edge service -- exercising the real routing and
+validation code, not a hand-written stand-in for it.
 """
 
 

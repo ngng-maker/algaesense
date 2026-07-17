@@ -4,6 +4,13 @@
 pydantic validation, status codes) in-process -- no real network socket or
 running server needed, same idea as click's CliRunner used throughout
 jaxsr-calibration's CLI tests.
+
+The rejection-path tests (out-of-range, negative, unknown reactor,
+malformed body) never reach `hardware.set_duty_cycle()` at all -- routing
+and validation reject the request first -- so they run against a real
+(unconnected) `NeoPixelLEDHardware` with no GPIO needed. Only the
+successful-apply test actually reaches hardware, so it's
+`@pytest.mark.hardware`.
 """
 
 from __future__ import annotations
@@ -14,16 +21,18 @@ import pytest
 from fastapi.testclient import TestClient
 from jaxsr_calibration.calibration.config import ReactorConfig
 
-from algaesense_edge.actuators.actuators import LEDActuator, MockLEDHardware
+from algaesense_edge.actuators.actuators import LEDActuator, NeoPixelLEDHardware
 from algaesense_edge.api.app import create_app
 from algaesense_edge.api.state import AppState
+
+_TEST_NUM_PIXELS = 30
 
 
 def _state_with_led(max_par: float = 500.0, par_per_full_duty: float = 1000.0) -> AppState:
     state = AppState()
     reactor = ReactorConfig(id="R01", model="pioreactor_20mL", max_par_umol_m2_s=max_par)
     state.led_actuators["R01"] = LEDActuator(
-        hardware=MockLEDHardware(),
+        hardware=NeoPixelLEDHardware(gpio_pin=18, num_pixels=_TEST_NUM_PIXELS),
         reactor_config=reactor,
         par_per_full_duty_umol_m2_s=par_per_full_duty,
     )
@@ -84,7 +93,10 @@ def test_recent_camera_readings_returns_recorded_rows() -> None:
     assert response.json()[0]["image_feature_vector"] == [1.0, 2.0, 3.0]
 
 
+@pytest.mark.hardware
 def test_set_led_within_bounds_succeeds() -> None:
+    """Run only on the Pi, with the WS2811 strip wired up -- this is the
+    one test in this file that actually reaches hardware."""
     client = TestClient(create_app(_state_with_led(max_par=500.0, par_per_full_duty=1000.0)))
 
     response = client.post("/actuators/led/R01", json={"par_umol_m2_s": 250.0})
@@ -121,8 +133,10 @@ def test_set_led_unknown_reactor_returns_404() -> None:
 def test_set_led_malformed_body_returns_422_from_pydantic_validation() -> None:
     client = TestClient(create_app(_state_with_led()))
 
-    # Missing the required par_umol_m2_s field entirely -- FastAPI/pydantic
-    # itself should reject this before our endpoint code even runs.
+    """
+    Missing the required par_umol_m2_s field entirely -- FastAPI/pydantic
+    itself should reject this before our endpoint code even runs.
+    """
     response = client.post("/actuators/led/R01", json={})
 
     assert response.status_code == 422

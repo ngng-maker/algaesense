@@ -1,6 +1,6 @@
 """Command-line entry point for algaesense-edge: `algaesense-edge start`
 runs acquisition (on a background thread) and the network API (in the
-foreground) together, using either real hardware or mocks.
+foreground) together, against real hardware.
 """
 
 from __future__ import annotations
@@ -14,15 +14,10 @@ import click
 import uvicorn
 from jaxsr_calibration.calibration.config import ReactorConfig
 
-from algaesense_edge.acquisition.camera import MockCameraCapture, create_hardware_camera_capture
+from algaesense_edge.acquisition.camera import create_hardware_camera_capture
 from algaesense_edge.acquisition.i2c import scan_i2c
-from algaesense_edge.acquisition.voc import (
-    MockTRHSensorReader,
-    MockVOCSensorReader,
-    create_hardware_trh_reader,
-    create_hardware_voc_reader,
-)
-from algaesense_edge.actuators.actuators import LEDActuator, MockLEDHardware, create_hardware_led
+from algaesense_edge.acquisition.voc import create_hardware_trh_reader, create_hardware_voc_reader
+from algaesense_edge.actuators.actuators import LEDActuator, create_hardware_led
 from algaesense_edge.api.app import create_app
 from algaesense_edge.api.state import AppState
 from algaesense_edge.service import AcquisitionService
@@ -40,7 +35,21 @@ def cli() -> None:
 @click.option("--camera", required=True, help="Camera ID.")
 @click.option("--max-par", type=float, required=True, help="This reactor's safety-max PAR, umol/m^2/s.")
 @click.option("--par-per-full-duty", type=float, required=True, help="Measured PAR at 100% LED duty cycle (see hardware setup docs).")
-@click.option("--led-gpio-pin", type=int, default=17, help="GPIO pin the LED's PWM control line is wired to.")
+@click.option("--led-gpio-pin", type=int, default=18, help="GPIO pin (BCM numbering) the LED strip's data line is wired to.")
+@click.option("--led-num-pixels", type=int, required=True, help="Number of pixels on the WS2811 LED strip.")
+@click.option("--led-pixel-order", default="BRG", help="Strip's color channel order, e.g. BRG for this project's ALITOVE strip.")
+@click.option(
+    "--voc-i2c-address",
+    type=lambda s: int(s, 0),
+    default="0x48",
+    help="ADS1115 I2C address the VOC sensor's ADC responds at.",
+)
+@click.option(
+    "--trh-i2c-address",
+    type=lambda s: int(s, 0),
+    default=None,
+    help="BME280 I2C address, if a temperature/humidity sensor is wired up. Omit to run without one.",
+)
 @click.option("--raw-data-dir", type=click.Path(path_type=Path), default=Path("data/raw"))
 @click.option("--camera-clip-dir", type=click.Path(path_type=Path), default=Path("data/clips"))
 @click.option("--camera-interval-min", type=float, default=60.0, help="Minutes between camera captures.")
@@ -48,12 +57,6 @@ def cli() -> None:
 @click.option("--camera-fps", type=float, default=10.0, help="Camera recording frame rate.")
 @click.option("--host", default="0.0.0.0", help="Network API bind address.")
 @click.option("--port", type=int, default=8000, help="Network API port.")
-@click.option(
-    "--mock-hardware",
-    is_flag=True,
-    default=False,
-    help="Use mock sensors/camera/LED instead of real hardware -- for testing this command's wiring off a Pi.",
-)
 def start(
     experiment: str,
     reactor: str,
@@ -62,6 +65,10 @@ def start(
     max_par: float,
     par_per_full_duty: float,
     led_gpio_pin: int,
+    led_num_pixels: int,
+    led_pixel_order: str,
+    voc_i2c_address: int,
+    trh_i2c_address: int | None,
     raw_data_dir: Path,
     camera_clip_dir: Path,
     camera_interval_min: float,
@@ -69,20 +76,22 @@ def start(
     camera_fps: float,
     host: str,
     port: int,
-    mock_hardware: bool,
 ) -> None:
-    """Start sensor acquisition and the network API together."""
+    """Start sensor acquisition and the network API together, against real hardware."""
 
-    if mock_hardware:
-        voc_reader = MockVOCSensorReader()
-        trh_reader = MockTRHSensorReader()
-        camera_capture = MockCameraCapture()
-        led_hardware = MockLEDHardware()
-    else:
-        voc_reader = create_hardware_voc_reader()
-        trh_reader = create_hardware_trh_reader()
-        camera_capture = create_hardware_camera_capture()
-        led_hardware = create_hardware_led(gpio_pin=led_gpio_pin)
+    voc_reader = create_hardware_voc_reader(i2c_address=voc_i2c_address)
+
+    """
+    `trh_reader` stays `None` when `--trh-i2c-address` is omitted -- no
+    temperature/humidity sensor is required to run; VOC_RAW_SCHEMA's
+    sample_t_c/sample_rh_pct fields are nullable for exactly this case.
+    """
+    trh_reader = create_hardware_trh_reader(i2c_address=trh_i2c_address) if trh_i2c_address is not None else None
+
+    camera_capture = create_hardware_camera_capture()
+    led_hardware = create_hardware_led(
+        gpio_pin=led_gpio_pin, num_pixels=led_num_pixels, pixel_order=led_pixel_order
+    )
 
     state = AppState()
     reactor_config = ReactorConfig(id=reactor, model="pioreactor_20mL", max_par_umol_m2_s=max_par)

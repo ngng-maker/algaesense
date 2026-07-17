@@ -14,11 +14,14 @@ import numpy as np
 Split into two halves with very different testability, same reasoning as
 voc.py: PROCESSING a recorded clip into a feature vector uses
 opencv-python (cv2), which is genuinely cross-platform and installs fine
-on a normal dev machine -- so that half is real, tested code. CAPTURING a
-clip from the actual physical camera needs picamera2, which is
-Raspberry-Pi-only, so that half is a mockable interface with a real mock
-and a clearly-labeled hardware placeholder, same pattern as the VOC/T-RH
-sensor readers.
+on a normal dev machine -- so that half is real, tested code (real .mp4
+fixture files, not a synthetic stand-in for a camera). CAPTURING a clip
+needs picamera2, which is Raspberry-Pi-only, so those tests are marked
+`@pytest.mark.hardware` and only run for real, on the Pi.
+
+Confirmed real hardware (2026-07-16): Raspberry Pi Camera Module v1
+(OV5647 sensor), connected over CSI (the ribbon-cable camera port, not
+USB), via `picamera2`.
 """
 
 
@@ -119,50 +122,6 @@ class CameraCapture(Protocol):
         """Record for `duration_s` seconds at `frame_rate_fps`, writing the
         result to `out_path`, and return that same path."""
         ...
-
-
-@dataclass
-class MockCameraCapture:
-    """A `CameraCapture` that writes a synthetic, solid-color clip instead
-    of using a real camera."""
-
-    """
-    Lets capture-then-process be tested end to end (write a known clip,
-    read it back, confirm the recovered color matches) on any machine, no
-    camera hardware required.
-    """
-
-    color_bgr: tuple[int, int, int] = (120, 150, 100)
-
-    resolution_wh: tuple[int, int] = (64, 64)
-
-    def record_clip(self, duration_s: float, frame_rate_fps: float, out_path: Path) -> Path:
-        n_frames = max(1, round(duration_s * frame_rate_fps))
-        width, height = self.resolution_wh
-
-        """
-        `VideoWriter_fourcc` packs a 4-character video codec tag ("mp4v")
-        into the single integer VideoWriter expects -- "fourcc" (four
-        character code) is the standard name for this kind of codec
-        identifier across video libraries, not something specific to
-        OpenCV.
-        """
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(str(out_path), fourcc, frame_rate_fps, (width, height))
-
-        """
-        `np.full((height, width, 3), color_bgr, dtype=np.uint8)` builds one
-        solid-color frame: every pixel gets the same [B, G, R] value.
-        `dtype=np.uint8` matters -- video frames are 8-bit-per-channel
-        (0-255), and OpenCV expects that exact type, not numpy's default
-        float64.
-        """
-        frame = np.full((height, width, 3), self.color_bgr, dtype=np.uint8)
-        for _ in range(n_frames):
-            writer.write(frame)
-        writer.release()
-
-        return out_path
 
 
 @dataclass

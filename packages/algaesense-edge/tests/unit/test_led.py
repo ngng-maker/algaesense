@@ -1,4 +1,12 @@
-"""Unit tests for algaesense_edge.actuators.actuators (LED-related classes)."""
+"""Unit tests for algaesense_edge.actuators.actuators (LED-related classes).
+
+LEDActuator's safety-validation logic (reject negative/NaN/over-max
+requests) never touches hardware at all -- it raises before ever calling
+`hardware.set_duty_cycle()` -- so those tests run against a real
+(unconnected) `NeoPixelLEDHardware` instance with no GPIO or neopixel
+library needed. Only the tests that actually call
+`set_duty_cycle`/`read_duty_cycle` for real need `@pytest.mark.hardware`.
+"""
 
 from __future__ import annotations
 
@@ -8,20 +16,76 @@ import pytest
 from jaxsr_calibration.calibration.config import ReactorConfig
 
 from algaesense_edge.actuators.actuators import (
-    GpiozeroLEDHardware,
     LEDActuator,
-    MockLEDHardware,
+    NeoPixelLEDHardware,
     UnsafeSetpointError,
     create_hardware_led,
 )
+
+"""
+Placeholder pixel count for constructing NeoPixelLEDHardware in tests
+that never actually reach hardware -- adjust to the real strip's length
+before running the @pytest.mark.hardware tests below for real on the Pi.
+"""
+_TEST_NUM_PIXELS = 30
 
 
 def _reactor(max_par: float = 500.0) -> ReactorConfig:
     return ReactorConfig(id="R01", model="pioreactor_20mL", max_par_umol_m2_s=max_par)
 
 
+def _hardware() -> NeoPixelLEDHardware:
+    return NeoPixelLEDHardware(gpio_pin=18, num_pixels=_TEST_NUM_PIXELS)
+
+
+def test_set_par_rejects_request_above_reactor_max() -> None:
+    actuator = LEDActuator(
+        hardware=_hardware(), reactor_config=_reactor(max_par=500.0), par_per_full_duty_umol_m2_s=1000.0
+    )
+
+    with pytest.raises(UnsafeSetpointError, match="exceeds reactor"):
+        actuator.set_par(600.0)
+
+
+def test_set_par_rejects_negative_request() -> None:
+    actuator = LEDActuator(hardware=_hardware(), reactor_config=_reactor(), par_per_full_duty_umol_m2_s=1000.0)
+
+    with pytest.raises(UnsafeSetpointError, match="invalid"):
+        actuator.set_par(-10.0)
+
+
+def test_set_par_rejects_nan_request() -> None:
+    actuator = LEDActuator(hardware=_hardware(), reactor_config=_reactor(), par_per_full_duty_umol_m2_s=1000.0)
+
+    with pytest.raises(UnsafeSetpointError, match="invalid"):
+        actuator.set_par(math.nan)
+
+
+def test_create_hardware_led_returns_a_real_neopixel_hardware_handle() -> None:
+    hardware = create_hardware_led(gpio_pin=18, num_pixels=60, pixel_order="BRG")
+
+    assert isinstance(hardware, NeoPixelLEDHardware)
+    assert hardware.gpio_pin == 18
+    assert hardware.num_pixels == 60
+    assert hardware.pixel_order == "BRG"
+
+
+def test_neopixel_hardware_fails_clearly_without_hardware_extra_installed() -> None:
+    """
+    adafruit-circuitpython-neopixel (and the Blinka `board` module it
+    needs) isn't installed on this dev machine -- the first actual
+    hardware call should fail with a clear, actionable ImportError.
+    """
+    hardware = _hardware()
+    with pytest.raises(ImportError, match="hardware"):
+        hardware.set_duty_cycle(0.5)
+
+
+@pytest.mark.hardware
 def test_set_par_within_bounds_applies_the_correct_duty_cycle() -> None:
-    hardware = MockLEDHardware()
+    """Run only on the Pi, with the WS2811 strip wired per this module's
+    confirmed pinout (GPIO18, BRG order)."""
+    hardware = _hardware()
     # par_per_full_duty=1000 means "1000 PAR at 100% duty" -- so requesting
     # 250 PAR should set a 25% duty cycle.
     actuator = LEDActuator(hardware=hardware, reactor_config=_reactor(), par_per_full_duty_umol_m2_s=1000.0)
@@ -29,48 +93,22 @@ def test_set_par_within_bounds_applies_the_correct_duty_cycle() -> None:
     applied = actuator.set_par(250.0)
 
     assert applied == 250.0
-    assert hardware.duty_cycle == pytest.approx(0.25)
+    assert hardware.read_duty_cycle() == pytest.approx(0.25)
 
 
+@pytest.mark.hardware
 def test_read_par_reflects_current_hardware_duty_cycle() -> None:
-    hardware = MockLEDHardware(duty_cycle=0.5)
+    hardware = _hardware()
     actuator = LEDActuator(hardware=hardware, reactor_config=_reactor(), par_per_full_duty_umol_m2_s=1000.0)
+
+    actuator.set_par(500.0)
 
     assert actuator.read_par() == pytest.approx(500.0)
 
 
-def test_set_par_rejects_request_above_reactor_max() -> None:
-    hardware = MockLEDHardware()
-    actuator = LEDActuator(
-        hardware=hardware, reactor_config=_reactor(max_par=500.0), par_per_full_duty_umol_m2_s=1000.0
-    )
-
-    with pytest.raises(UnsafeSetpointError, match="exceeds reactor"):
-        actuator.set_par(600.0)
-
-    # The rejected request must not have reached the hardware at all --
-    # the duty cycle should still be at its untouched default.
-    assert hardware.duty_cycle == 0.0
-
-
-def test_set_par_rejects_negative_request() -> None:
-    hardware = MockLEDHardware()
-    actuator = LEDActuator(hardware=hardware, reactor_config=_reactor(), par_per_full_duty_umol_m2_s=1000.0)
-
-    with pytest.raises(UnsafeSetpointError, match="invalid"):
-        actuator.set_par(-10.0)
-
-
-def test_set_par_rejects_nan_request() -> None:
-    hardware = MockLEDHardware()
-    actuator = LEDActuator(hardware=hardware, reactor_config=_reactor(), par_per_full_duty_umol_m2_s=1000.0)
-
-    with pytest.raises(UnsafeSetpointError, match="invalid"):
-        actuator.set_par(math.nan)
-
-
+@pytest.mark.hardware
 def test_set_par_at_exactly_the_maximum_is_allowed() -> None:
-    hardware = MockLEDHardware()
+    hardware = _hardware()
     actuator = LEDActuator(
         hardware=hardware, reactor_config=_reactor(max_par=500.0), par_per_full_duty_umol_m2_s=1000.0
     )
@@ -80,26 +118,12 @@ def test_set_par_at_exactly_the_maximum_is_allowed() -> None:
     assert applied == 500.0
 
 
+@pytest.mark.hardware
 def test_turn_off_sets_duty_cycle_to_zero() -> None:
-    hardware = MockLEDHardware(duty_cycle=0.8)
+    hardware = _hardware()
     actuator = LEDActuator(hardware=hardware, reactor_config=_reactor(), par_per_full_duty_umol_m2_s=1000.0)
 
+    actuator.set_par(400.0)
     actuator.turn_off()
 
-    assert hardware.duty_cycle == 0.0
-
-
-def test_create_hardware_led_returns_a_real_gpiozero_hardware_handle() -> None:
-    hardware = create_hardware_led(gpio_pin=17)
-
-    assert isinstance(hardware, GpiozeroLEDHardware)
-    assert hardware.gpio_pin == 17
-
-
-def test_gpiozero_hardware_fails_clearly_without_hardware_extra_installed() -> None:
-    # gpiozero isn't installed on this dev machine (it's part of the Pi-only
-    # 'hardware' extra) -- the first actual hardware call should fail with a
-    # clear, actionable ImportError.
-    hardware = GpiozeroLEDHardware(gpio_pin=17)
-    with pytest.raises(ImportError, match="hardware"):
-        hardware.set_duty_cycle(0.5)
+    assert hardware.read_duty_cycle() == 0.0

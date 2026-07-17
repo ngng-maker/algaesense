@@ -4,9 +4,8 @@ bounds, independent of whatever the caller (network request) sends.
 """
 
 from algaesense_edge.actuators.actuators import (
-    GpiozeroLEDHardware,
     LEDActuator,
-    MockLEDHardware,
+    NeoPixelLEDHardware,
     StirringActuator,
     TemperatureActuator,
     UnsafeSetpointError,
@@ -15,8 +14,7 @@ from algaesense_edge.actuators.actuators import (
 
 __all__ = [
     "LEDActuator",
-    "MockLEDHardware",
-    "GpiozeroLEDHardware",
+    "NeoPixelLEDHardware",
     "create_hardware_led",
     "UnsafeSetpointError",
     "TemperatureActuator",

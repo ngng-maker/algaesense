@@ -1,12 +1,17 @@
-"""Phase 1b Definition-of-Done, per the project plan: "on the Pi (or a
-mocked-hardware dev machine), the service streams both sensor types at
-their respective rates to local Parquet, and rejects an out-of-range LED
-command over the network while accepting an in-range one."
+"""Phase 1b Definition-of-Done, per the project plan: "the service streams
+both sensor types at their respective rates to local Parquet, and rejects
+an out-of-range LED command over the network while accepting an in-range
+one."
 
-Runs entirely against mock hardware (MockVOCSensorReader, MockTRHSensorReader,
-MockCameraCapture) -- proving the whole chain (acquisition -> writer ->
-Parquet -> API state -> live network endpoint) actually connects, the same
-role Milestone 4's end-to-end test played for jaxsr-calibration.
+Runs against REAL hardware (Alphasense PID + ADS1115, OV5647 camera, WS2811
+LED strip) -- proving the whole chain (acquisition -> writer -> Parquet ->
+API state -> live network endpoint) actually connects on the real rig, the
+same role Milestone 4's end-to-end test played for jaxsr-calibration. Marked
+`@pytest.mark.hardware`: run this for real, on the Pi, not on a dev machine
+(there is no mocked-hardware version of this test anymore -- see
+acquisition/voc.py, acquisition/camera.py, actuators/actuators.py for why).
+No T/RH sensor is wired up yet, so this test runs with `trh_reader=None`,
+per VOC_RAW_SCHEMA's nullable sample_t_c/sample_rh_pct fields.
 """
 
 from __future__ import annotations
@@ -14,24 +19,32 @@ from __future__ import annotations
 import datetime as dt
 
 import polars as pl
+import pytest
 from fastapi.testclient import TestClient
 from jaxsr_calibration.calibration.config import ReactorConfig
 
-from algaesense_edge.acquisition.camera import MockCameraCapture
-from algaesense_edge.acquisition.voc import MockTRHSensorReader, MockVOCSensorReader
-from algaesense_edge.actuators.actuators import LEDActuator, MockLEDHardware
+from algaesense_edge.acquisition.camera import create_hardware_camera_capture
+from algaesense_edge.acquisition.voc import create_hardware_voc_reader
+from algaesense_edge.actuators.actuators import LEDActuator, create_hardware_led
 from algaesense_edge.api.app import create_app
 from algaesense_edge.api.state import AppState
 from algaesense_edge.service import AcquisitionService
 
 _START = dt.datetime(2026, 7, 25, 8, 0, 0, tzinfo=dt.timezone.utc)
 
+"""
+Adjust to the real strip's actual pixel count before running this test
+for real.
+"""
+_LED_NUM_PIXELS = 30
 
+
+@pytest.mark.hardware
 def test_phase1b_streams_both_sensor_types_and_gates_led_commands(tmp_path) -> None:
     state = AppState()
     reactor = ReactorConfig(id="R01", model="pioreactor_20mL", max_par_umol_m2_s=500.0)
     state.led_actuators["R01"] = LEDActuator(
-        hardware=MockLEDHardware(),
+        hardware=create_hardware_led(gpio_pin=18, num_pixels=_LED_NUM_PIXELS, pixel_order="BRG"),
         reactor_config=reactor,
         par_per_full_duty_umol_m2_s=1000.0,
     )
@@ -41,9 +54,9 @@ def test_phase1b_streams_both_sensor_types_and_gates_led_commands(tmp_path) -> N
         reactor_id="R01",
         sensor_id="PID01",
         camera_id="CAM01",
-        voc_reader=MockVOCSensorReader(voltage_mv=2.0),
-        trh_reader=MockTRHSensorReader(temperature_c=32.0, humidity_pct=55.0),
-        camera_capture=MockCameraCapture(color_bgr=(80, 120, 90), resolution_wh=(32, 32)),
+        voc_reader=create_hardware_voc_reader(),
+        trh_reader=None,
+        camera_capture=create_hardware_camera_capture(),
         camera_clip_dir=tmp_path / "clips",
         raw_data_dir=tmp_path / "raw",
         state=state,

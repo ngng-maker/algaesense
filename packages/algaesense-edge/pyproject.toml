@@ -38,19 +38,19 @@ dependencies = [
 # above. All of these are Raspberry-Pi-only (they either need real I2C/GPIO
 # hardware to even import successfully, or -- for picamera2 -- a real camera
 # module) and won't install/import on a generic dev machine, same reasoning
-# as jaxsr-calibration's own [hardware] extra. Concrete hardware choices
-# (see acquisition/voc.py, acquisition/camera.py, actuators/led.py for the
-# reasoning): ADS1115 for the VOC sensor's ADC, BME280 for T/RH, picamera2
-# for the camera, gpiozero for LED PWM control -- all extremely common,
-# well-documented choices for a Raspberry Pi project, picked so this package
-# is actually usable out of the box rather than waiting on hardware
-# decisions indefinitely.
+# as jaxsr-calibration's own [hardware] extra. Confirmed real hardware (see
+# acquisition/voc.py, acquisition/camera.py, actuators/actuators.py for the
+# full reasoning): ADS1115 for the VOC sensor's ADC (Alphasense PID + ISB),
+# BME280 for T/RH (not yet acquired, but ready), picamera2 for the OV5647
+# camera module, adafruit-circuitpython-neopixel for the WS2811 LED strip
+# (NOT gpiozero PWM -- this project's LED is an addressable strip, driven by
+# a timed serial protocol, not a simple dimmable PWM pin).
 [project.optional-dependencies]
 hardware = [
     "adafruit-circuitpython-ads1x15",
     "adafruit-circuitpython-bme280",
     "picamera2",
-    "gpiozero",
+    "adafruit-circuitpython-neopixel",
     "smbus2",
 ]
 dev = ["pytest", "hypothesis"]

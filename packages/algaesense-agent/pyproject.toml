@@ -44,6 +44,8 @@ algaesense-mcp-labwiki = "algaesense_agent.labwiki.server:main"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = ["hardware: requires real reactor hardware (WS2811 strip etc.), skipped by default"]
+addopts = "-m 'not hardware'"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/algaesense_agent"]

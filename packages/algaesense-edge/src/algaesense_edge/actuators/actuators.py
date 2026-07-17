@@ -10,16 +10,28 @@ from jaxsr_calibration.calibration.config import ReactorConfig
 
 
 """
-Combines what used to be three files (errors.py, base.py, led.py) -- LED
-control is the only actuator actually built so far; the safety-validation
-logic never trusts whatever asked for a change, independent of the caller
-(a script, a person, or later an AI agent).
+LED control is the only actuator actually built so far; the
+safety-validation logic never trusts whatever asked for a change,
+independent of the caller (a script, a person, or later an AI agent).
+
+Confirmed real hardware (2026-07-16): a WS2811 addressable RGB LED strip
+(ALITOVE), driven from GPIO18 (BCM numbering) through a 74AHCT125 logic
+level shifter (3.3V -> 5V) and a 470ohm series resistor into the strip's
+data line, powered from a separate 12V supply with a common ground back
+to the Pi. This is NOT simple PWM dimming (a single-brightness gpiozero
+PWMLED, this project's earlier assumption) -- WS2811 is a timed serial
+protocol (each bit is a precisely-timed HIGH pulse width, ~0.4us for a 0
+bit and ~0.85us for a 1 bit, at 800kHz), driven via the Pi's DMA+PWM
+peripheral through `adafruit-circuitpython-neopixel` (built on
+`rpi_ws281x`), not a bare PWM duty cycle.
 
 Split the same way as the acquisition readers: `LEDHardware` is the thin,
-swappable "how do I actually set a PWM pin" contract (mock for tests, real
-`gpiozero`-backed implementation for a Pi); `LEDActuator` is the safety and
-unit-conversion logic, which never touches hardware directly and is fully
-testable regardless of which `LEDHardware` it's given.
+swappable "how do I actually drive the strip" contract; `LEDActuator` is
+the safety and unit-conversion logic, which never touches hardware
+directly. `LEDActuator` itself needed no changes for this hardware
+switch -- it only calls `set_duty_cycle`/`read_duty_cycle`, so swapping
+what's behind that Protocol was enough.
+
 `TemperatureActuator`/`StirringActuator` at the bottom are not implemented --
 no such hardware exists in this project yet -- kept here as the template to
 follow (same hardware-Protocol-plus-safety-wrapper shape as LED) once it does,
@@ -41,81 +53,120 @@ class UnsafeSetpointError(ValueError):
 
 
 class LEDHardware(Protocol):
-    """Anything that can set/read a PWM duty cycle, as a fraction 0.0-1.0."""
+    """Anything that can set/read an overall light output level, as a
+    fraction 0.0-1.0."""
 
     def set_duty_cycle(self, fraction: float) -> None: ...
     def read_duty_cycle(self) -> float: ...
 
 
 @dataclass
-class MockLEDHardware:
-    """A fake LED for tests and dev machines with no real hardware wired up."""
+class NeoPixelLEDHardware:
+    """The real WS2811 LED strip, driven via `adafruit-circuitpython-neopixel`."""
 
     """
-    Just remembers whatever duty cycle was last set, in memory.
-    """
+    Every pixel is held at `color` (full white, (255, 255, 255), by
+    default -- a reasonable general grow-light color absent a specific
+    spectrum requirement) and the strip's overall `.brightness` is what
+    `set_duty_cycle` actually adjusts -- NeoPixel's `.brightness` scales
+    every pixel's set color down uniformly, which is exactly the
+    "single dimmable light source" interface `LEDActuator` expects,
+    without needing to re-set each pixel's raw color on every setpoint
+    change.
 
-    duty_cycle: float = 0.0
+    `num_pixels` has no default -- it must match the physical strip
+    actually wired up, and guessing a number here would silently produce
+    wrong PAR-per-pixel behavior rather than a loud, obvious error.
+    `pixel_order="BRG"` matches this project's specific ALITOVE strip,
+    confirmed by testing -- NOT the library's own default (GRB), which is
+    a different strip's channel order and would swap colors silently if
+    assumed here instead of set explicitly. "BRG" isn't one of the
+    library's own predefined name constants (`neopixel.RGB`/`GRB`/`BGR`/
+    etc.) -- `pixel_order` accepts any such string directly, so this is
+    passed straight through rather than looked up as a module attribute.
 
-    def set_duty_cycle(self, fraction: float) -> None:
-        self.duty_cycle = fraction
-
-    def read_duty_cycle(self) -> float:
-        return self.duty_cycle
-
-
-@dataclass
-class GpiozeroLEDHardware:
-    """The real LED, controlled via GPIO PWM."""
-
-    """
-    Backed by `gpiozero`'s `PWMLED`, this package's chosen library for
-    GPIO/PWM control on a Pi (simpler, more modern API than the older
-    `RPi.GPIO`). Can't be run or verified without real Pi GPIO hardware.
+    Honesty note, same as the acquisition readers: built against
+    `adafruit-circuitpython-neopixel`'s standard, documented usage and
+    this project's own confirmed wiring, but can't be run or verified
+    without the real strip and GPIO access -- untested on this dev
+    machine by nature.
     """
 
     gpio_pin: int
+    num_pixels: int
+    pixel_order: str = "BRG"
+    color: tuple[int, int, int] = (255, 255, 255)
 
     """
     Deliberately unannotated -- see acquisition/voc.py's
     Ads1115VOCSensorReader for why (keeps this out of the
     dataclass-generated __init__/__repr__).
     """
-    _pwm_led = None
+    _pixels = None
 
     def _connect(self):
-        """Open the actual GPIO connection, the first time it's needed."""
+        """Open the actual GPIO/DMA connection, the first time it's needed."""
 
         try:
-            from gpiozero import PWMLED
+            import board
+            import neopixel
         except ImportError as exc:
             raise ImportError(
-                "GpiozeroLEDHardware requires the 'hardware' extra (gpiozero). "
-                "Install with `pip install algaesense-edge[hardware]` on a "
-                "Raspberry Pi."
+                "NeoPixelLEDHardware requires the 'hardware' extra "
+                "(adafruit-circuitpython-neopixel). Install with "
+                "`pip install algaesense-edge[hardware]` on a Raspberry Pi."
             ) from exc
-        self._pwm_led = PWMLED(self.gpio_pin)
+
+        """
+        `getattr(board, f"D{self.gpio_pin}")` maps a plain BCM pin number
+        (18) onto the `board` module's named pin object (`board.D18`) --
+        the same "map an int onto the library's own naming" pattern
+        already used for the ADS1115 channel, applied here to a pin
+        instead of a channel.
+        """
+        pin = getattr(board, f"D{self.gpio_pin}")
+
+        """
+        `pixel_order` takes a plain string directly (e.g. "BRG") -- the
+        library's `neopixel.RGB`/`GRB`/`BGR`/etc. names are just
+        convenience aliases for those same strings, and "BRG" specifically
+        isn't one of the library's predefined names, so this passes
+        `self.pixel_order` straight through rather than looking it up as
+        a module attribute.
+        """
+        self._pixels = neopixel.NeoPixel(
+            pin,
+            self.num_pixels,
+            brightness=0.0,
+            auto_write=True,
+            pixel_order=self.pixel_order,
+        )
+        self._pixels.fill(self.color)
 
     def set_duty_cycle(self, fraction: float) -> None:
-        if self._pwm_led is None:
+        if self._pixels is None:
             self._connect()
 
         """
-        gpiozero's PWMLED.value IS the duty cycle, as a 0.0-1.0 fraction --
-        setting it directly drives the PWM signal, no separate "apply" call
-        needed.
+        Setting `.brightness` (rather than re-filling every pixel with a
+        scaled-down color) lets the strip's own hardware/driver-level
+        brightness scaling do the dimming -- `auto_write=True` means this
+        takes effect immediately, no separate "show"/"apply" call needed.
         """
-        self._pwm_led.value = fraction
+        self._pixels.brightness = fraction
 
     def read_duty_cycle(self) -> float:
-        if self._pwm_led is None:
+        if self._pixels is None:
             self._connect()
-        return float(self._pwm_led.value)
+        return float(self._pixels.brightness)
 
 
-def create_hardware_led(gpio_pin: int) -> LEDHardware:
-    """Get a real, GPIO-backed LED hardware handle."""
-    return GpiozeroLEDHardware(gpio_pin=gpio_pin)
+def create_hardware_led(
+    gpio_pin: int, num_pixels: int, pixel_order: str = "BRG", color: tuple[int, int, int] = (255, 255, 255)
+) -> LEDHardware:
+    """Get a real, GPIO-backed LED strip hardware handle (see
+    `NeoPixelLEDHardware`)."""
+    return NeoPixelLEDHardware(gpio_pin=gpio_pin, num_pixels=num_pixels, pixel_order=pixel_order, color=color)
 
 
 @dataclass
@@ -168,7 +219,7 @@ class LEDActuator:
         valid 0.0-1.0 duty cycle given a correct calibration constant, but
         this second clamp is defense-in-depth against a miscalibrated
         `par_per_full_duty_umol_m2_s` producing an out-of-range fraction --
-        the PWM hardware itself only accepts 0-1.
+        the hardware itself only accepts 0-1.
         """
         duty_fraction = min(max(duty_fraction, 0.0), 1.0)
 
@@ -195,10 +246,10 @@ class TemperatureActuator(Protocol):
 
     """
     When it exists, follow LEDActuator's pattern above: a thin hardware
-    Protocol (mock + real implementations) plus a safety-validating wrapper
-    class that clamps/rejects requests against a configured min/max
-    temperature (jaxsr_calibration.calibration.config.ReactorConfig already
-    has min_reactor_temp_c/max_reactor_temp_c fields ready for exactly this).
+    Protocol plus a safety-validating wrapper class that clamps/rejects
+    requests against a configured min/max temperature
+    (jaxsr_calibration.calibration.config.ReactorConfig already has
+    min_reactor_temp_c/max_reactor_temp_c fields ready for exactly this).
     """
 
     def set_temperature_c(self, temperature_c: float) -> float: ...
