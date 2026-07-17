@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import polars as pl
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -86,7 +87,33 @@ class PartitionedParquetWriter:
             was already flushed for this hour, read it back and append the
             new rows on top, so no already-written data is lost.
             """
-            existing = pq.read_table(out_path)
+            """
+            Read back via polars, not `pyarrow.parquet.read_table` --
+            this partition layout's own directory names
+            (`{partition_key}={partition_value}`, e.g. "sensor_id=PID01")
+            are indistinguishable from pyarrow's Hive-partitioning
+            convention. `pq.read_table` auto-detects that pattern and
+            invents a phantom partition column from the directory name,
+            which then collides with the real "sensor_id" data column
+            already inside the file (confirmed: `pyarrow.lib.ArrowTypeError:
+            Unable to merge: Field sensor_id has incompatible types:
+            string vs dictionary<...>`). Polars' reader has no such
+            partition auto-detection, so it reads the file exactly as
+            written; `.to_arrow()` hands it back as the same kind of
+            `pa.Table` `pa.concat_tables` below expects.
+            """
+            """
+            `.cast(self.schema)` afterward: polars' own `.to_arrow()`
+            conversion uses its own physical Arrow types by default (e.g.
+            `large_string` instead of plain `string`, and every field
+            nullable regardless of this schema's own not-null
+            declarations) -- close enough to be the same *logical* data,
+            but not identical enough for `concat_tables`, which requires
+            an exact schema match. Casting back to `self.schema`
+            reconciles both sides to the one schema this whole pipeline
+            actually uses everywhere else.
+            """
+            existing = pl.read_parquet(out_path).to_arrow().cast(self.schema)
             table = pa.concat_tables([existing, table])
         pq.write_table(table, out_path)
 

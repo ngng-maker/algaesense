@@ -3,6 +3,12 @@
 Uses jaxsr_calibration's real VOC_RAW_SCHEMA rather than a made-up test
 schema, so these tests also double-check the writer actually produces files
 that match the schema the rest of the pipeline (jaxsr-calibration) expects.
+
+Read-backs use `polars.read_parquet`, not `pyarrow.parquet.read_table` --
+see writer.py's own technical block for why: this layout's own
+`{partition_key}={partition_value}` directory naming looks exactly like
+pyarrow's Hive-partitioning convention, which `pq.read_table` auto-detects
+and then collides with the real same-named data column already in the file.
 """
 
 from __future__ import annotations
@@ -10,7 +16,7 @@ from __future__ import annotations
 import datetime as dt
 from pathlib import Path
 
-import pyarrow.parquet as pq
+import polars as pl
 import pytest
 from jaxsr_calibration.logging_.schema import VOC_RAW_SCHEMA
 
@@ -67,8 +73,8 @@ def test_flush_writes_to_the_expected_hour_partition_path(tmp_path: Path) -> Non
         tmp_path / "experiments" / "exp_test" / "sensor_id=PID01" / "hour=2026-07-15T09.parquet"
     )
     assert expected_path.exists()
-    table = pq.read_table(expected_path)
-    assert table.num_rows == 1
+    table = pl.read_parquet(expected_path)
+    assert table.height == 1
 
 
 def test_crossing_an_hour_boundary_auto_flushes_the_previous_hour(tmp_path: Path) -> None:
@@ -115,9 +121,9 @@ def test_restarting_mid_hour_appends_rather_than_overwrites(tmp_path: Path) -> N
     hour_path = (
         tmp_path / "experiments" / "exp_test" / "sensor_id=PID01" / "hour=2026-07-15T09.parquet"
     )
-    table = pq.read_table(hour_path)
-    assert table.num_rows == 2
-    assert sorted(table.column("pid_voltage_mv").to_pylist()) == [1.0, 2.0]
+    table = pl.read_parquet(hour_path)
+    assert table.height == 2
+    assert sorted(table["pid_voltage_mv"].to_list()) == [1.0, 2.0]
 
 
 def test_flush_with_nothing_buffered_is_a_safe_no_op(tmp_path: Path) -> None:
