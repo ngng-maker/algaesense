@@ -19,12 +19,14 @@ over the MCP protocol.
 
 ## Setup order
 
+For the full walkthrough (installing Hermes, wiring in your Anthropic key, creating the Slack app and bot token, registering these MCP servers, and verifying it all end to end), see [`docs/slack_and_hermes_setup.md`](../../../../../docs/slack_and_hermes_setup.md) at the repo root. Short version:
+
 1. Install `algaesense-agent` (and its `mcp`/`jaxsr-calibration` dependencies) into the same Python environment Hermes runs in.
-2. Install `hermes-agent` (`pip install hermes-agent`) if not already present — see https://hermes-agent.nousresearch.com/docs/getting-started/quickstart.
+2. Install `hermes-agent` and connect your LLM provider (`hermes config set ANTHROPIC_API_KEY ...`, `hermes model`).
 3. Merge `hermes_config.example.yaml`'s `mcp_servers:` block into `~/.hermes/config.yaml`, filling in the real paths/URLs for your installation.
-4. Set the Slack environment variables documented in that same file, and enable the `message.channels`/`message.groups` event subscriptions on the Slack app.
+4. Create the Slack app (`hermes slack manifest --agent-view --write` is the fast path), install it, and set `SLACK_BOT_TOKEN`/`SLACK_APP_TOKEN`/`SLACK_ALLOWED_USERS`/`SLACK_HOME_CHANNEL` via `hermes config set`.
 5. Point the system prompt at `system_prompt.md`.
 6. Register the weekly cron job per `weekly_cron_job.md`.
-7. Message the bot in Slack to confirm the four MCP servers show up as available tools (Hermes's own `/mcp list` or equivalent command).
+7. Message the bot in Slack to confirm the four MCP servers show up as available tools (Hermes's own `/mcp list` or equivalent command), and confirm the propose-then-confirm rule actually holds before testing anything against real hardware.
 
 None of this is automated by algaesense-agent itself — v1 is "here are the pieces and the wiring instructions," not a one-command installer. See the plan's Phase 3 (packaging) for where a bootstrap CLI is intended to eventually live.
