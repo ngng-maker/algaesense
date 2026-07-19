@@ -19,3 +19,9 @@ build/
 # Locally-generated data (raw sensor Parquet, calibration outputs) --
 # reproducible from a real experiment run, not something to version control.
 data/
+
+# Local secrets: Pi SSH connection details, API keys, tokens -- never
+# committed. See .env.example for the expected keys with no real values.
+.env
+.env.*
+!.env.example
