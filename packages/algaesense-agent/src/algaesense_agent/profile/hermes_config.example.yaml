@@ -45,6 +45,13 @@ mcp_servers:
       # Only needed for record_camera_zero_step_from_edge.
       ALGAESENSE_EDGE_BASE_URL: "http://192.168.1.42:8000"
 
+  algaesense_diagnostics:
+    command: "algaesense-mcp-diagnostics"
+    env:
+      # Reads raw VOC Parquet files, not derived features -- same root as
+      # algaesense_pipeline/algaesense_dashboard either way.
+      ALGAESENSE_DATA_DIR: "/path/to/algaesense/data"
+
 # Slack gateway: these are Hermes's own environment variables, not
 # something algaesense-agent reads directly -- set them in whatever
 # shell/service file starts the Hermes gateway daemon, not here.
