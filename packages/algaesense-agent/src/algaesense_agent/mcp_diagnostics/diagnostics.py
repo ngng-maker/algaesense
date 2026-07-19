@@ -7,7 +7,6 @@ from __future__ import annotations
 import datetime as dt
 from pathlib import Path
 
-import polars as pl
 import yaml
 from jaxsr_calibration.calibration.config import SensorConfig
 from jaxsr_calibration.diagnostics.ambient import run_ambient_baseline
@@ -21,46 +20,16 @@ from jaxsr_calibration.diagnostics.models import (
 from jaxsr_calibration.diagnostics.swap_pilot import run_swap_pilot
 from jaxsr_calibration.diagnostics.weekly import run_weekly_audit
 
+from algaesense_agent.raw_readers import load_raw_voc_readings
 
 """
 Every diagnostic function in jaxsr_calibration expects already-collected
 data (a `readings=` DataFrame) -- see jaxsr_calibration.errors for why
 (they raise LiveAcquisitionNotAvailableError without it). This module's
-whole job is loading that DataFrame from the real raw Parquet files
-algaesense-edge already wrote, then calling straight through to the real
-diagnostic; none of the actual health-check math lives here.
+whole job is calling straight through to the real diagnostic over data
+loaded via `algaesense_agent.raw_readers.load_raw_voc_readings`; none of
+the actual health-check math lives here.
 """
-
-
-class NoRawReadingsFoundError(FileNotFoundError):
-    """Raised when no raw VOC Parquet files exist yet for the requested
-    experiment."""
-
-
-def load_raw_voc_readings(data_dir: Path, experiment_id: str) -> pl.DataFrame:
-    """Load and concatenate every sensor's raw VOC readings for one
-    experiment -- the "clean-air" or "ambient" diagnostic run, not a
-    growth experiment."""
-
-    """
-    Globs `{partition}=*` (every sensor that reported during this
-    experiment) rather than requiring the caller to name sensors up
-    front -- a fleet-zero/ambient check is inherently about the whole
-    fleet, per-sensor breakdown included, not one sensor at a time.
-    Read via polars, not raw pyarrow -- this directory layout's own
-    `sensor_id=PID01`-style partition naming is exactly what triggers the
-    Hive-partitioning false positive documented in CLAUDE.md/writer.py;
-    polars has no such auto-detection.
-    """
-    experiment_dir = Path(data_dir) / "raw" / "experiments" / experiment_id
-    paths = sorted(experiment_dir.glob("sensor_id=*/hour=*.parquet")) if experiment_dir.exists() else []
-
-    if not paths:
-        raise NoRawReadingsFoundError(
-            f"No raw VOC Parquet files found for experiment {experiment_id!r} under {experiment_dir}"
-        )
-
-    return pl.concat([pl.read_parquet(p) for p in paths])
 
 
 def fleet_zero_check(data_dir: Path, experiment_id: str, duration_min: int = 60) -> FleetZeroResult:

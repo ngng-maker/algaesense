@@ -1,6 +1,7 @@
-"""Unit tests for algaesense_agent.mcp_diagnostics: loading real raw VOC
-Parquet files (written via algaesense-edge's real writer, not hand-rolled)
-and dispatching to jaxsr-calibration's real diagnostics.
+"""Unit tests for algaesense_agent.mcp_diagnostics: dispatching real raw
+VOC Parquet data (written via algaesense-edge's real writer, not
+hand-rolled) to jaxsr-calibration's real diagnostics. The loader itself
+(`load_raw_voc_readings`) has its own tests in test_raw_readers.py.
 """
 
 from __future__ import annotations
@@ -15,10 +16,8 @@ from algaesense_edge.acquisition.writer import PartitionedParquetWriter
 from jaxsr_calibration.logging_.schema import VOC_RAW_SCHEMA
 
 from algaesense_agent.mcp_diagnostics.diagnostics import (
-    NoRawReadingsFoundError,
     ambient_baseline_check,
     fleet_zero_check,
-    load_raw_voc_readings,
     swap_pilot_check,
     weekly_audit_check,
 )
@@ -62,21 +61,6 @@ def _write_rows(data_dir: Path, experiment_id: str, sensor_id: str, rows: list[d
     for row in rows:
         writer.write_row(row)
     writer.close()
-
-
-def test_load_raw_voc_readings_concatenates_every_sensor(tmp_path: Path) -> None:
-    _write_rows(tmp_path, "exp_diag_test", "PID01", [_row(sensor_id="PID01", pid_voltage_mv=0.1)])
-    _write_rows(tmp_path, "exp_diag_test", "PID02", [_row(sensor_id="PID02", pid_voltage_mv=0.2)])
-
-    readings = load_raw_voc_readings(tmp_path, "exp_diag_test")
-
-    assert readings.height == 2
-    assert set(readings["sensor_id"].to_list()) == {"PID01", "PID02"}
-
-
-def test_load_raw_voc_readings_raises_for_unknown_experiment(tmp_path: Path) -> None:
-    with pytest.raises(NoRawReadingsFoundError):
-        load_raw_voc_readings(tmp_path, "does_not_exist")
 
 
 def test_fleet_zero_check_flags_a_healthy_fleet_as_green(tmp_path: Path) -> None:

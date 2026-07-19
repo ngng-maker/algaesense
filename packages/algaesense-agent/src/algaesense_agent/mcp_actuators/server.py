@@ -8,19 +8,25 @@ from dataclasses import asdict
 from mcp.server.fastmcp import FastMCP
 
 from algaesense_agent.mcp_actuators.actuators import (
+    apply_led_profile,
     apply_led_setpoint,
+    propose_led_profile,
     propose_led_setpoint,
     propose_stirring_setpoint,
     propose_temperature_setpoint,
+    stop_led_profile,
 )
 from algaesense_agent.mcp_actuators.edge_client import EdgeClient
 
 
 """
-Only `apply_led_setpoint` below is capable of a side effect (it reaches a
-real Raspberry Pi over the network). Every other tool in this server is
-safe to call freely -- see actuators.py's module docstring for the full
-reasoning behind the propose/apply split.
+`apply_led_change`, `apply_led_profile_change`, and `stop_led_profile_change`
+are the only tools in this server capable of a side effect (each reaches a
+real Raspberry Pi over the network). Every other tool is safe to call
+freely -- see actuators.py's module docstring for the full reasoning
+behind the propose/apply split. `stop_led_profile_change` needs no
+separate propose step (see actuators.py's stop_led_profile docstring for
+why).
 """
 
 mcp = FastMCP("algaesense-actuators")
@@ -69,6 +75,38 @@ async def apply_led_change(reactor_id: str, par_umol_m2_s: float) -> dict:
     edge = _build_edge_client()
     try:
         return await apply_led_setpoint(edge, reactor_id, par_umol_m2_s)
+    finally:
+        await edge.close()
+
+
+@mcp.tool()
+def propose_led_profile_change(reactor_id: str, profile: dict) -> dict:
+    """Describe a proposed time-varying LED control profile for a reactor
+    (shape: constant/ramp/sinusoid/step, plus that shape's parameters),
+    without starting it. Always call this before apply_led_profile_change
+    and show the result to the user for confirmation."""
+    return asdict(propose_led_profile(reactor_id, profile))
+
+
+@mcp.tool()
+async def apply_led_profile_change(reactor_id: str, profile: dict) -> dict:
+    """Actually start a control profile on a reactor's LED. Only call this
+    after the user has explicitly confirmed the corresponding
+    propose_led_profile_change result."""
+    edge = _build_edge_client()
+    try:
+        return await apply_led_profile(edge, reactor_id, profile)
+    finally:
+        await edge.close()
+
+
+@mcp.tool()
+async def stop_led_profile_change(reactor_id: str) -> dict:
+    """Stop whatever control profile is currently running on a reactor's
+    LED, if any. Reports whether one was actually running."""
+    edge = _build_edge_client()
+    try:
+        return await stop_led_profile(edge, reactor_id)
     finally:
         await edge.close()
 

@@ -105,7 +105,21 @@ Power-on sequence that avoids surprises:
 
 `create_hardware_led(gpio_pin, num_pixels, ...)` needs the strip's actual pixel count — I don't know this number for your ALITOVE strip. Count the individually-addressable LEDs on it (usually printed on the reel or in the product listing, e.g. "60 LED/m × length"), and use that value everywhere `--led-num-pixels` appears (the CLI) or `_TEST_NUM_PIXELS` (the hardware-marked tests, which you should update to match before running `pytest -m hardware` for real).
 
-## 7. A sane first-test order (don't jump straight to the full service)
+## 7. Deriving `--par-per-full-duty` without a real PAR meter
+
+`--par-per-full-duty` (`par_per_full_duty_umol_m2_s` in code) is "how much PAR this specific LED/vial setup produces at 100% duty cycle" — every requested PAR value gets converted to a duty cycle by dividing by this number, so getting it wrong scales every light setpoint in the system by the same error.
+
+This is **not** the same measurement as the experimentalist protocol's lux-meter step (which only checks you're under a ~15,000 lux photoinhibition ceiling, once, during LED installation). A plain lux meter can't give you PAR directly — lux is weighted to human eye sensitivity (peaks green, ~555nm), while PAR is a flat photon count over 400-700nm, so the conversion between them depends on your specific LED's spectrum, not a universal constant.
+
+Without a dedicated quantum/PAR meter, derive an approximate value:
+
+1. With the vial in place and empty, run the LED at 100% duty cycle (e.g. `create_hardware_led(...).set_duty_cycle(1.0)` directly, same one-off approach as the first-test order below) and measure illuminance at the vial surface with a phone lux meter — the same physical setup as the protocol's ceiling check, just read at full brightness instead of only checking it's under the limit.
+2. Multiply that lux reading by a conversion factor appropriate for your LED's spectrum. For generic white LEDs, roughly **0.014–0.02 μmol·m⁻²·s⁻¹ per lux** is a commonly cited starting range — but this varies by color temperature/spectrum and isn't a value you should treat as precise. If your LED's datasheet or product listing states a color temperature (e.g. "6500K daylight white" vs "3000K warm white"), lean toward the lower end of that range for warmer/redder LEDs and the higher end for cooler/bluer ones, as a rough rule of thumb — but treat this as a starting estimate, not a substitute for a real measurement.
+3. Use the result as `--par-per-full-duty`.
+
+**Every PAR value this system reports or acts on inherits this approximation's uncertainty** until it's replaced with a real quantum/PAR meter reading (e.g. an Apogee MQ-500 series sensor, ~$100-200) — worth remembering if you're ever comparing a PAR number here against another lab's instrument-calibrated value, or trusting a discovered light-response equation's coefficients as physically exact.
+
+## 8. A sane first-test order (don't jump straight to the full service)
 
 Each of these isolates one piece, so a failure tells you exactly where to look instead of a tangle of "it didn't work":
 
@@ -115,7 +129,7 @@ Each of these isolates one piece, so a failure tells you exactly where to look i
 4. The camera alone — record one clip, then manually try `process_clip` on it to check for the H.264/mp4 issue above before it's buried inside a running service.
 5. Only then run the full `algaesense-edge start` below.
 
-## 8. Running it for real
+## 9. Running it for real
 
 ```
 sudo .venv/bin/algaesense-edge start \

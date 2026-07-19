@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import os
 from dataclasses import asdict
 from pathlib import Path
@@ -9,6 +10,7 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 from algaesense_agent.mcp_pipeline.pipeline import fit_symbolic_model, suggest_next_experiments
+from algaesense_agent.mcp_pipeline.pipeline import discover_led_response_dynamics as _discover_led_response_dynamics
 
 
 """
@@ -82,6 +84,36 @@ def suggest_next_experiment_conditions(
         "acquisition": result.acquisition,
         "fit": asdict(result.fit),
     }
+
+
+@mcp.tool()
+def discover_led_response_dynamics(
+    experiment_id: str,
+    reactor_id: str,
+    sensor_id: str,
+    calibration_run_id: str,
+    since: str | None = None,
+    until: str | None = None,
+    max_terms: int = 5,
+) -> dict:
+    """Discover how a reactor's VOC output dynamically responds to its
+    LED's actual light history over one experiment -- meant to be run over
+    data collected during a ramp/sinusoid/step control-profile run, where
+    PAR genuinely varies within the run (a static setpoint gives it no
+    within-run trend to discover). `since`/`until` are optional ISO
+    datetime strings to scope to part of the experiment; omit both to use
+    the whole thing."""
+    result = _discover_led_response_dynamics(
+        experiment_id,
+        reactor_id,
+        sensor_id,
+        calibration_run_id,
+        data_dir=_data_dir(),
+        since=dt.datetime.fromisoformat(since) if since is not None else None,
+        until=dt.datetime.fromisoformat(until) if until is not None else None,
+        max_terms=max_terms,
+    )
+    return asdict(result)
 
 
 def main() -> None:

@@ -14,6 +14,8 @@ from jaxsr_calibration.logging_.schema import CAMERA_RAW_SCHEMA, VOC_RAW_SCHEMA
 from algaesense_edge.acquisition.camera import CameraCapture, process_clip
 from algaesense_edge.acquisition.voc import TRHSensorReader, VOCSensorReader
 from algaesense_edge.acquisition.writer import PartitionedParquetWriter
+from algaesense_edge.actuators.actuators import UnsafeSetpointError
+from algaesense_edge.actuators.control_profiles import evaluate_control_profile
 from algaesense_edge.api.state import AppState
 
 
@@ -89,6 +91,23 @@ class AcquisitionService:
         """Read the VOC + T/RH sensors once, write the row to Parquet, and
         make it available to the API's recent-readings buffer."""
 
+        """
+        `reactor_par_umol_m2_s` reads AppState's generic "last
+        successfully applied setpoint" cache (see
+        AppState.last_applied_setpoint, updated by the manual
+        `/actuators/led/{reactor_id}` endpoint and by
+        `tick_control_profiles`) rather than real hardware -- avoids
+        adding a hardware touch to this ~1Hz tick just to record what the
+        LED is doing. Two known, deliberately-accepted limitations: (1)
+        doesn't survive a mid-experiment service restart, since the cache
+        starts empty even if the physical LED is still lit from before
+        the restart; (2) a one-tick (~1s) lag, since this tick runs BEFORE
+        `tick_control_profiles` in cli.py's loop, so this row reflects the
+        PREVIOUS tick's applied value, not the one about to be set this
+        tick -- negligible next to the PID sensor's own physical response
+        time, but worth knowing if debugging an apparent off-by-one-second
+        light/VOC correlation.
+        """
         row = {
             "timestamp": timestamp,
             "experiment_id": self.experiment_id,
@@ -100,7 +119,7 @@ class AcquisitionService:
             "sample_flow_sccm": None,
             "pump_pwm": None,
             "lamp_hours": self.lamp_hours,
-            "reactor_par_umol_m2_s": None,
+            "reactor_par_umol_m2_s": self.state.last_applied_setpoint.get((self.reactor_id, "led")),
             "reactor_temp_c": None,
             "reactor_od": None,
             "reactor_ph": None,
@@ -150,6 +169,53 @@ class AcquisitionService:
         self.camera_writer.write_row(row)
         self.state.record_camera_reading(row)
         return row
+
+    def tick_control_profiles(self, now: dt.datetime) -> dict[tuple[str, str], str]:
+        """Evaluate every (reactor, actuator_kind)'s currently-running
+        control profile (if any) and apply the resulting setpoint.
+        Returns, per `(reactor_id, actuator_kind)` that had an active
+        profile, one of "applied" or "rejected" -- callers (cli.py's loop)
+        can print/act on a rejection, but nothing here raises."""
+
+        """
+        Re-evaluating and re-applying on every single tick (not just once
+        at profile start) is what makes this safe: `apply_setpoint()`
+        re-runs its own bounds-check every time (`LEDActuator.set_par()`
+        underneath, for the one actuator kind that exists today), so a
+        profile can never "outrun" the actuator's safety limits even
+        though the profile's own math is trusted, unreviewed-per-run data
+        (see control_profiles.py's module docstring). Driven generically
+        through `ControlProfileActuator` (see actuators.py) so this loop
+        doesn't need to know whether it's actually driving an LED or a
+        future heater/stirrer.
+        """
+        results: dict[tuple[str, str], str] = {}
+        for (reactor_id, actuator_kind), active_profile in list(self.state.active_control_profiles.items()):
+            actuator = self.state.control_actuators.get((reactor_id, actuator_kind))
+            if actuator is None:
+                continue
+
+            elapsed_s = (now - active_profile.started_at).total_seconds()
+            target_value = evaluate_control_profile(active_profile.profile, elapsed_s)
+
+            try:
+                applied = actuator.apply_setpoint(target_value)
+            except UnsafeSetpointError:
+                """
+                A profile that ever asks for an out-of-bounds value is
+                stopped outright rather than clamped and continued -- a
+                profile whose math produces an unsafe value is a bad
+                profile, not a one-off blip to silently paper over.
+                """
+                actuator.turn_off()
+                self.state.last_applied_setpoint[(reactor_id, actuator_kind)] = 0.0
+                self.state.stop_control_profile(reactor_id, actuator_kind)
+                results[(reactor_id, actuator_kind)] = "rejected"
+            else:
+                self.state.last_applied_setpoint[(reactor_id, actuator_kind)] = applied
+                results[(reactor_id, actuator_kind)] = "applied"
+
+        return results
 
     def close(self) -> None:
         """Flush any buffered-but-unwritten rows -- call when acquisition stops."""

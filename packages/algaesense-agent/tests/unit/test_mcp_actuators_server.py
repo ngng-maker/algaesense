@@ -25,6 +25,16 @@ async def test_propose_led_change_tool_returns_a_structured_proposal() -> None:
     assert payload["requested_value"] == 250.0
 
 
+async def test_propose_led_profile_change_tool_returns_a_structured_proposal() -> None:
+    profile = {"shape": "constant", "par_umol_m2_s": 100.0}
+
+    result = await mcp.call_tool("propose_led_profile_change", {"reactor_id": "R01", "profile": profile})
+
+    payload = json.loads(result[0].text)
+    assert payload["reactor_id"] == "R01"
+    assert payload["profile"] == profile
+
+
 async def test_propose_temperature_change_tool_reports_not_implemented() -> None:
     """
     FastMCP re-raises a tool's exception as a `ToolError` rather than

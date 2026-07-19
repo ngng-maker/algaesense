@@ -97,12 +97,14 @@ def test_recent_camera_readings_returns_recorded_rows() -> None:
 def test_set_led_within_bounds_succeeds() -> None:
     """Run only on the Pi, with the WS2811 strip wired up -- this is the
     one test in this file that actually reaches hardware."""
-    client = TestClient(create_app(_state_with_led(max_par=500.0, par_per_full_duty=1000.0)))
+    state = _state_with_led(max_par=500.0, par_per_full_duty=1000.0)
+    client = TestClient(create_app(state))
 
     response = client.post("/actuators/led/R01", json={"par_umol_m2_s": 250.0})
 
     assert response.status_code == 200
     assert response.json() == {"reactor_id": "R01", "applied_par_umol_m2_s": 250.0}
+    assert state.last_applied_setpoint[("R01", "led")] == 250.0
 
 
 def test_set_led_out_of_range_is_rejected_with_422() -> None:
@@ -140,3 +142,87 @@ def test_set_led_malformed_body_returns_422_from_pydantic_validation() -> None:
     response = client.post("/actuators/led/R01", json={})
 
     assert response.status_code == 422
+
+
+"""
+Starting/stopping a profile only validates and records it in AppState's
+in-memory dict -- it never calls `hardware.set_duty_cycle()` (that only
+happens later, per-tick, in AcquisitionService.tick_control_profiles) --
+so every test below runs with no hardware needed at all, unlike the
+immediate-apply `/actuators/led/{reactor_id}` endpoint above.
+"""
+
+
+def test_start_led_profile_succeeds_for_a_known_reactor() -> None:
+    state = _state_with_led()
+    client = TestClient(create_app(state))
+
+    response = client.post("/actuators/led/R01/profile", json={"profile": {"shape": "constant", "par_umol_m2_s": 100.0}})
+
+    assert response.status_code == 200
+    assert response.json() == {"reactor_id": "R01", "profile": {"shape": "constant", "par_umol_m2_s": 100.0}}
+    assert ("R01", "led") in state.active_control_profiles
+
+
+def test_start_led_profile_unknown_reactor_returns_404() -> None:
+    client = TestClient(create_app(_state_with_led()))
+
+    response = client.post("/actuators/led/R99/profile", json={"profile": {"shape": "constant", "par_umol_m2_s": 100.0}})
+
+    assert response.status_code == 404
+
+
+def test_start_led_profile_rejects_unknown_shape_with_422() -> None:
+    client = TestClient(create_app(_state_with_led()))
+
+    response = client.post("/actuators/led/R01/profile", json={"profile": {"shape": "spiral"}})
+
+    assert response.status_code == 422
+    assert "Unknown control profile shape" in response.json()["detail"]
+
+
+def test_start_led_profile_rejects_missing_required_keys_with_422() -> None:
+    client = TestClient(create_app(_state_with_led()))
+
+    response = client.post("/actuators/led/R01/profile", json={"profile": {"shape": "ramp"}})
+
+    assert response.status_code == 422
+    assert "missing required keys" in response.json()["detail"]
+
+
+def test_start_led_profile_logs_a_yaml_record_when_experiment_wiring_is_present(tmp_path) -> None:
+    state = _state_with_led()
+    state.experiment_id = "exp_control_profile_test"
+    state.raw_data_dir = tmp_path / "raw"
+    client = TestClient(create_app(state))
+
+    client.post("/actuators/led/R01/profile", json={"profile": {"shape": "constant", "par_umol_m2_s": 100.0}})
+
+    profile_dir = tmp_path / "raw" / "experiments" / "exp_control_profile_test" / "control_profiles"
+    logged_files = list(profile_dir.glob("R01_*.yaml"))
+    assert len(logged_files) == 1
+    assert "constant" in logged_files[0].read_text()
+
+
+def test_start_led_profile_does_not_log_without_experiment_wiring() -> None:
+    """A bare AppState() (no experiment_id/raw_data_dir -- true for every
+    other test in this file) must not try to write anywhere."""
+    state = _state_with_led()
+    client = TestClient(create_app(state))
+
+    response = client.post("/actuators/led/R01/profile", json={"profile": {"shape": "constant", "par_umol_m2_s": 100.0}})
+
+    assert response.status_code == 200
+
+
+def test_stop_led_profile_reports_whether_one_was_running() -> None:
+    state = _state_with_led()
+    client = TestClient(create_app(state))
+    client.post("/actuators/led/R01/profile", json={"profile": {"shape": "constant", "par_umol_m2_s": 100.0}})
+
+    first = client.delete("/actuators/led/R01/profile")
+    second = client.delete("/actuators/led/R01/profile")
+
+    assert first.json() == {"reactor_id": "R01", "was_running": True}
+    assert second.json() == {"reactor_id": "R01", "was_running": False}
+    assert ("R01", "led") not in state.active_control_profiles

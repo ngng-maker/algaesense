@@ -4,6 +4,7 @@ and next-experiment suggestions.
 
 from __future__ import annotations
 
+import datetime as dt
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -11,7 +12,10 @@ import jaxsr
 import numpy as np
 import polars as pl
 
-from jaxsr_calibration.processing.features import load_features_for_jaxsr
+from jaxsr_calibration.calibration.apply import apply_calibration
+from jaxsr_calibration.processing.features import load_features_for_jaxsr, load_timeseries_for_jaxsr
+
+from algaesense_agent.raw_readers import load_raw_voc_readings
 
 
 """
@@ -203,4 +207,123 @@ def suggest_next_experiments(
         scores=[float(s) for s in result.scores],
         acquisition=result.acquisition,
         fit=fit,
+    )
+
+
+@dataclass
+class DynamicsDiscoveryResult:
+    """A discovered ODE per state variable, fit over one experiment's
+    real, un-averaged VOC trajectory (see discover_led_response_dynamics).
+    """
+
+    state_names: list[str]
+    n_samples: int
+    equations: dict[str, str]
+    metrics: dict[str, dict[str, float]]
+    coefficients: dict[str, list[float]]
+    selected_features: dict[str, list[str]]
+
+
+"""
+`jaxsr.discover_dynamics`'s own DynamicsResult holds a raw numpy array
+(`derivatives`) and live, unpicklable `SymbolicRegressor` objects
+(`models`) -- neither JSON-safe, same problem `mcp_diagnostics/server.py`
+already solved for `CovariateModel`. `DynamicsDiscoveryResult` above is a
+hand-shaped, JSON-safe replacement: `equations`/`metrics` are copied
+straight through (already plain), `coefficients`/`selected_features` are
+extracted per state from the live `SymbolicRegressor` objects, and the
+raw `derivatives` array plus the live models themselves are deliberately
+not exposed -- internal detail, not needed by an MCP tool caller.
+"""
+
+
+def discover_led_response_dynamics(
+    experiment_id: str,
+    reactor_id: str,
+    sensor_id: str,
+    calibration_run_id: str,
+    data_dir: Path,
+    since: dt.datetime | None = None,
+    until: dt.datetime | None = None,
+    max_terms: int = 5,
+    derivative_method: str = "finite_difference",
+) -> DynamicsDiscoveryResult:
+    """Feed one experiment's real, per-second VOC trajectory -- with the
+    LED's actually-applied PAR as a second state variable -- into
+    `jaxsr.discover_dynamics`, to find how light dynamically drives the
+    VOC response, not just its static level."""
+
+    """
+    Meant to be run over data collected during a control-profile run (a
+    ramp/sinusoid/step light schedule -- see
+    algaesense_edge.actuators.control_profiles): a static PAR setpoint
+    gives PAR no within-run trend to discover anything from.
+    `jaxsr.discover_dynamics`'s default basis library already includes
+    polynomial (degree 3) and pairwise-interaction terms across every
+    state variable passed in, so PAR x VOC interaction terms are already
+    candidates here with no custom BasisLibrary needed.
+    """
+
+    readings = load_raw_voc_readings(data_dir, experiment_id)
+    readings = readings.filter(
+        (pl.col("reactor_id") == reactor_id) & (pl.col("sensor_id") == sensor_id)
+    )
+    if since is not None:
+        readings = readings.filter(pl.col("timestamp") >= since)
+    if until is not None:
+        readings = readings.filter(pl.col("timestamp") <= until)
+
+    if readings.height == 0:
+        raise ValueError(
+            f"No raw VOC readings found for reactor {reactor_id!r}, sensor {sensor_id!r} "
+            f"in experiment {experiment_id!r} within the requested window."
+        )
+
+    """
+    A clear, specific error here (rather than letting a downstream
+    numpy/jaxsr error surface) for the two real ways this column can be
+    empty: the experiment predates AcquisitionService recording
+    actually-applied PAR into each row, or the LED was simply never
+    actuated during this window.
+    """
+    if readings["reactor_par_umol_m2_s"].null_count() == readings.height:
+        raise ValueError(
+            f"reactor_par_umol_m2_s is entirely null for reactor {reactor_id!r} in "
+            f"experiment {experiment_id!r} -- either this experiment predates PAR "
+            "recording being wired up, or the LED was never actuated during this "
+            "window. Nothing to discover a light-response equation from."
+        )
+
+    """
+    `apply_calibration`'s `data_dir` is the exact directory holding
+    `{calibration_run_id}.parquet`/`.yaml`, not the top-level data_dir --
+    matching the one convention already established for this
+    (mcp_calibration/server.py's finish_standard_addition_session).
+    """
+    calibration_dir = data_dir / "derived" / "calibrations" / "standard_addition"
+    ppm, ppm_stderr, _ = apply_calibration(
+        readings["pid_voltage_mv"],
+        sensor_id,
+        readings["sample_t_c"],
+        readings["sample_rh_pct"],
+        calibration_run_id,
+        data_dir=calibration_dir,
+    )
+    readings = readings.with_columns(ppm.alias("ppm_asgas"), ppm_stderr.alias("ppm_asgas_stderr"))
+
+    X, t, state_names = load_timeseries_for_jaxsr(
+        readings, state_columns=["ppm_asgas", "reactor_par_umol_m2_s"]
+    )
+
+    result = jaxsr.discover_dynamics(
+        X, t, state_names=state_names, max_terms=max_terms, derivative_method=derivative_method
+    )
+
+    return DynamicsDiscoveryResult(
+        state_names=state_names,
+        n_samples=len(t),
+        equations=result.equations,
+        metrics=result.metrics,
+        coefficients={name: [float(c) for c in model.coefficients_] for name, model in result.models.items()},
+        selected_features={name: list(model.selected_features_) for name, model in result.models.items()},
     )

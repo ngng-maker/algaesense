@@ -169,6 +169,29 @@ def create_hardware_led(
     return NeoPixelLEDHardware(gpio_pin=gpio_pin, num_pixels=num_pixels, pixel_order=pixel_order, color=color)
 
 
+class ControlProfileActuator(Protocol):
+    """Anything a time-varying control profile (see
+    algaesense_edge.actuators.control_profiles) can drive -- one apply
+    call per tick, plus a way to turn it off if a computed value gets
+    rejected."""
+
+    """
+    Deliberately just these two methods, not a merge of every actuator
+    kind's own richer interface (`LEDActuator.set_par`/`read_par` stay as
+    they are) -- this Protocol exists purely so
+    `AcquisitionService.tick_control_profiles` can drive ANY actuator kind
+    generically, without knowing whether it's actually an LED, a future
+    heater, or a future stirrer underneath. `LEDActuator.apply_setpoint`
+    below is a thin delegate to `set_par`, added FOR this Protocol; a
+    future `TemperatureActuator`/`StirringActuator` should add their own
+    equivalent thin delegate the same way, not rename their existing
+    domain-specific method.
+    """
+
+    def apply_setpoint(self, value: float) -> float: ...
+    def turn_off(self) -> None: ...
+
+
 @dataclass
 class LEDActuator:
     """Turns a requested light level into safe, real LED output."""
@@ -183,11 +206,24 @@ class LEDActuator:
 
     `par_per_full_duty_umol_m2_s` is a per-installation CALIBRATION CONSTANT
     ("how much PAR this specific LED/vial setup produces at 100% duty
-    cycle") -- required explicitly, with no made-up default, because the
-    hardware protocol's own installation steps (measuring illuminance at the
-    vial surface with a lux meter, per the experimentalist protocol) are
-    exactly how a real value for this gets measured; a fabricated default
-    number here would be worse than requiring the real measurement.
+    cycle") -- required explicitly, with no made-up default, because a
+    fabricated default number here would be worse than requiring a real
+    measurement.
+
+    NOT the same thing as the experimentalist protocol's lux-meter step
+    (Resources/spirulina_voc_experimentalist_protocol.md's LED installation
+    section) -- that's a one-time, coarse photoinhibition SAFETY CEILING
+    check ("keep illuminance under ~15,000 lux"), not a PAR calibration, and
+    a plain lux meter can't give you PAR directly: lux is weighted to human
+    eye sensitivity (peaks green ~555nm) while PAR is a flat photon count
+    over 400-700nm, so the conversion between them depends on the specific
+    LED's spectrum, not a universal constant. Until a real quantum/PAR
+    meter is available, derive this value approximately: measure lux at the
+    vial surface at 100% duty cycle (same physical setup as the protocol's
+    ceiling check, just read at full brightness), then multiply by an
+    LED-appropriate lux-to-PPFD conversion factor (see docs/hardware_setup.md
+    for the derivation and its caveats) -- an approximation with real,
+    acknowledged uncertainty, not a calibrated measurement.
     """
 
     hardware: LEDHardware
@@ -226,6 +262,12 @@ class LEDActuator:
         self.hardware.set_duty_cycle(duty_fraction)
         return par_umol_m2_s
 
+    def apply_setpoint(self, value: float) -> float:
+        """`ControlProfileActuator` protocol entry point -- delegates to
+        `set_par`, so the generic control-profile tick loop can drive an
+        LED without knowing it's an LED specifically."""
+        return self.set_par(value)
+
     def read_par(self) -> float:
         """Read back the currently-applied light level."""
 
@@ -250,6 +292,12 @@ class TemperatureActuator(Protocol):
     requests against a configured min/max temperature
     (jaxsr_calibration.calibration.config.ReactorConfig already has
     min_reactor_temp_c/max_reactor_temp_c fields ready for exactly this).
+    For control-profile support (ramps/cycles, not just static setpoints),
+    also add a thin `apply_setpoint`/`turn_off` pair satisfying
+    `ControlProfileActuator` above, the same way `LEDActuator.apply_setpoint`
+    delegates to `set_par` -- then register it in `AppState.control_actuators`
+    keyed by `(reactor_id, "temperature")` and no other engine code needs
+    to change.
     """
 
     def set_temperature_c(self, temperature_c: float) -> float: ...

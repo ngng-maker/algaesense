@@ -281,11 +281,20 @@ Default state variables for load_timeseries_for_jaxsr -- the things whose
 TREND OVER TIME (not just their average) is usually the actual point of
 interest for a single run: the VOC concentration, and biomass if a camera
 is present. Controllable settings like PAR are deliberately NOT included
-here -- within one experiment they're constant (that's what "one
-experiment = one fixed set of settings" means), so they have no within-run
-trend to discover; comparing how the discovered dynamics change ACROSS
-experiments run at different settings is a separate, human (or later,
-agent) analysis step, not something one discover_dynamics call does alone.
+here BY DEFAULT -- within a run held at one static setpoint, PAR is
+constant, so it has no within-run trend to discover; comparing how the
+discovered dynamics change ACROSS experiments run at different settings is
+a separate, human (or later, agent) analysis step, not something one
+discover_dynamics call does alone.
+
+The exception: a run driven by a time-varying control profile (a
+ramp/sinusoid/step light schedule -- see
+algaesense_edge.actuators.control_profiles) genuinely does vary PAR within
+the run, so it's meaningful there. A caller with that kind of data passes
+`state_columns=["ppm_asgas", "reactor_par_umol_m2_s"]` explicitly (see
+algaesense_agent.mcp_pipeline.pipeline.discover_led_response_dynamics) --
+this function itself needed no change to support that, since
+`state_columns` was already a plain caller-supplied parameter.
 """
 _DEFAULT_STATE_COLUMNS = ["ppm_asgas", "biomass_signal_arb"]
 

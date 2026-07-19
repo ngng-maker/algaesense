@@ -93,13 +93,22 @@ def start(
         gpio_pin=led_gpio_pin, num_pixels=led_num_pixels, pixel_order=led_pixel_order
     )
 
-    state = AppState()
+    state = AppState(experiment_id=experiment, raw_data_dir=raw_data_dir)
     reactor_config = ReactorConfig(id=reactor, model="pioreactor_20mL", max_par_umol_m2_s=max_par)
-    state.led_actuators[reactor] = LEDActuator(
+    led_actuator = LEDActuator(
         hardware=led_hardware,
         reactor_config=reactor_config,
         par_per_full_duty_umol_m2_s=par_per_full_duty,
     )
+    state.led_actuators[reactor] = led_actuator
+
+    """
+    Dual-registered: `led_actuators` (above) backs the manual single-setpoint
+    path; `control_actuators` (same object, generic key) is what
+    `AcquisitionService.tick_control_profiles` drives -- see AppState's
+    own docstring for why these are kept separate.
+    """
+    state.control_actuators[(reactor, "led")] = led_actuator
 
     service = AcquisitionService(
         experiment_id=experiment,
@@ -132,6 +141,19 @@ def start(
             if time.monotonic() >= next_camera_tick:
                 service.run_camera_tick(dt.datetime.now(dt.timezone.utc))
                 next_camera_tick = time.monotonic() + camera_interval_s
+
+            """
+            Runs every tick (same ~1 Hz cadence as VOC sampling), not just
+            once when a profile starts -- see AcquisitionService.tick_control_profiles.
+            """
+            profile_results = service.tick_control_profiles(dt.datetime.now(dt.timezone.utc))
+            for (reactor_id, actuator_kind), outcome in profile_results.items():
+                if outcome == "rejected":
+                    click.echo(
+                        f"{actuator_kind!r} control profile for reactor {reactor_id!r} rejected an "
+                        "unsafe setpoint; profile stopped and actuator turned off."
+                    )
+
             """
             ~1 Hz VOC sampling.
             """

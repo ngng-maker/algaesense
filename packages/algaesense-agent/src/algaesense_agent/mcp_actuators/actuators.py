@@ -73,6 +73,54 @@ async def apply_led_setpoint(edge: EdgeClient, reactor_id: str, par_umol_m2_s: f
     return await edge.set_led(reactor_id, par_umol_m2_s)
 
 
+@dataclass
+class LedProfileProposal:
+    """A described, not-yet-started time-varying control profile (see
+    algaesense_edge.actuators.control_profiles for the supported
+    shapes)."""
+
+    reactor_id: str
+    profile: dict
+    note: str
+
+
+def propose_led_profile(reactor_id: str, profile: dict) -> LedProfileProposal:
+    """Describe a control profile to start on a reactor's LED, without
+    starting it."""
+
+    """
+    Same "no network call" reasoning as propose_led_setpoint -- the real
+    shape/parameter validation happens on the edge service, inside
+    apply_led_profile, not duplicated here. This just formats the profile
+    clearly for the human to review and confirm.
+    """
+    return LedProfileProposal(
+        reactor_id=reactor_id,
+        profile=profile,
+        note=(
+            f"Proposing to start a {profile.get('shape')!r} control profile on reactor "
+            f"{reactor_id!r}'s LED: {profile}. Not yet started -- requires explicit "
+            "confirmation before calling apply_led_profile."
+        ),
+    )
+
+
+async def apply_led_profile(edge: EdgeClient, reactor_id: str, profile: dict) -> dict:
+    """Actually start a control profile on a reactor's LED over the
+    network. Every value the running profile computes is still
+    re-validated per-tick by the edge service's own LEDActuator bounds
+    check -- this call only starts it, it does not bypass that."""
+    return await edge.start_led_profile(reactor_id, profile)
+
+
+async def stop_led_profile(edge: EdgeClient, reactor_id: str) -> dict:
+    """Stop whatever control profile is currently running on a reactor's
+    LED, if any. Has an immediate side effect (the LED stops following
+    the profile), but stopping something already-approved needs no
+    separate propose step -- there is nothing new to review."""
+    return await edge.stop_led_profile(reactor_id)
+
+
 def propose_temperature_setpoint(reactor_id: str, temperature_c: float) -> ActuatorProposal:
     """Not implemented -- no temperature-control hardware exists yet."""
     raise ActuatorNotImplementedError(

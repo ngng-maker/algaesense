@@ -35,6 +35,23 @@ class SetpointRejectedError(ValueError):
     """
 
 
+class ProfileRejectedError(ValueError):
+    """Raised when the edge service rejected a control profile as
+    malformed (unknown shape, or missing/invalid parameters for its
+    shape)."""
+
+    """
+    A distinct exception from SetpointRejectedError on purpose -- this is
+    algaesense_edge.actuators.control_profiles.validate_control_profile
+    rejecting the profile's SHAPE before it's ever started, not
+    LEDActuator rejecting a specific PAR value the profile computed. The
+    latter can still happen later, per-tick, on the edge service (see
+    AcquisitionService.tick_led_profiles) -- there is no way for this
+    client to observe that after the fact, since it happens on the edge
+    service's own schedule, not in response to a request this client made.
+    """
+
+
 class EdgeClient:
     """Talks to one algaesense-edge instance's network API."""
 
@@ -74,6 +91,32 @@ class EdgeClient:
             detail = response.json().get("detail", response.text)
             raise SetpointRejectedError(detail)
 
+        response.raise_for_status()
+        return response.json()
+
+    async def start_led_profile(self, reactor_id: str, profile: dict) -> dict:
+        """Start a time-varying control profile on a reactor's LED; the
+        edge service validates the profile's shape before ever recording
+        it as active."""
+
+        response = await self._client.post(f"/actuators/led/{reactor_id}/profile", json={"profile": profile})
+
+        if response.status_code == 404:
+            raise UnknownReactorError(
+                f"algaesense-edge has no LED actuator configured for reactor {reactor_id!r}"
+            )
+
+        if response.status_code == 422:
+            detail = response.json().get("detail", response.text)
+            raise ProfileRejectedError(detail)
+
+        response.raise_for_status()
+        return response.json()
+
+    async def stop_led_profile(self, reactor_id: str) -> dict:
+        """Stop whatever control profile is currently running on a
+        reactor's LED, if any."""
+        response = await self._client.delete(f"/actuators/led/{reactor_id}/profile")
         response.raise_for_status()
         return response.json()
 
