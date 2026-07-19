@@ -1,6 +1,6 @@
 # Hardware setup: SSH access and powering the rig
 
-This covers two things you asked for help with: getting SSH working between your remote laptop and the Pi, and safely powering the Pi + the 12V LED strip supply together. Written for your confirmed hardware: Alphasense PID + ISB → ADS1115 (0x48) → Pi, WS2811 (ALITOVE) strip on GPIO18 through a 74AHCT125 level shifter, OV5647 camera module.
+This covers two things you asked for help with: getting SSH working between your remote laptop and the Pi, and safely powering the Pi + the 12V LED strip supply together. Written for your confirmed hardware: Raspberry Pi 4, Alphasense PID + ISB → ADS1115 (0x48) → Pi, WS2811 (ALITOVE) strip on GPIO18 through a 74AHCT125 level shifter, OV5647 camera module.
 
 ## 1. Enabling SSH on the Pi
 
@@ -47,7 +47,46 @@ pip install -e "packages/algaesense-edge[hardware]"
 
 (This repo isn't pushed to a remote yet — it only exists locally on this laptop right now, as a local git repository. If you want, I can help you push it to a private GitHub repo so `git clone`/`git pull` onto the Pi is straightforward; just say so.)
 
-## 4. Wiring and power sequencing
+## 4. OS-level setup the pip install alone won't handle
+
+These are real, known requirements for this exact hardware combination on a Raspberry Pi 4 running Raspberry Pi OS — none of this is hypothetical, but none of it has been verified against your actual Pi yet either, since this dev environment has no way to run it for real.
+
+**GPIO/PWM access needs root.** Driving the WS2811 strip goes through `rpi_ws281x` (underneath `adafruit-circuitpython-neopixel`), which needs direct access to the Pi's PWM/DMA hardware — this normally requires root. Run `algaesense-edge start` with `sudo` (using the venv's own Python explicitly, since `sudo` resets `PATH` and won't automatically use your activated venv):
+
+```
+sudo .venv/bin/algaesense-edge start ...
+```
+
+If you see a permission error mentioning `/dev/mem` or DMA, this is why.
+
+**Onboard audio conflicts with the LED's PWM channel.** The Pi's built-in audio output uses the same PWM peripheral `rpi_ws281x` needs for the LED strip — with both active, the strip can flicker, show wrong colors, or not respond at all. Disable onboard audio before testing the LED: edit `/boot/config.txt` (or `/boot/firmware/config.txt` on newer Raspberry Pi OS releases) and set:
+
+```
+dtparam=audio=off
+```
+
+then reboot. You don't need Pi audio output for this project, so there's no downside to leaving it off permanently.
+
+**`picamera2` needs a system package, not just pip.** It depends on `libcamera`'s Python bindings, which aren't purely pip-installable — the `[hardware]` extra may report success while the actual import still fails on the Pi. Install the system package too:
+
+```
+sudo apt update
+sudo apt install -y python3-picamera2
+```
+
+If your virtualenv doesn't see it afterward, recreate the venv with `--system-site-packages` so it can see the system-installed `picamera2`, rather than trying to `pip install picamera2` into an isolated venv.
+
+**A likely camera format mismatch, not yet resolved in code.** `picamera2`'s `H264Encoder` writes a raw H.264 elementary stream. `process_clip` (this project's own code) reads recorded clips via `cv2.VideoCapture`, which may not open a raw `.h264` file directly depending on the OpenCV build's codec support — you may see `process_clip: could not open video file at ...` even though the clip recorded fine. If that happens, remux it into a real container first:
+
+```
+ffmpeg -i clip.h264 -c copy clip.mp4
+```
+
+(`sudo apt install -y ffmpeg` if it's not already there.) This is a real, known gap — if it turns out to happen every time rather than being an edge case, tell me and I'll fix `Picamera2CameraCapture` to write directly into an `.mp4` container instead (picamera2 supports this via `FfmpegOutput`), so this manual remux step goes away entirely.
+
+**Raspberry Pi 4 specifically**: no additional compatibility concerns beyond the above — `rpi_ws281x` has long-standing, solid support for the Pi 4's GPIO/PWM architecture. (This is a real, current concern on a Raspberry Pi 5 instead, which moved GPIO handling to a separate RP1 chip that older PWM+DMA-based libraries don't uniformly support yet — not applicable to your setup.)
+
+## 5. Wiring and power sequencing
 
 Your confirmed wiring:
 
@@ -59,17 +98,27 @@ Power-on sequence that avoids surprises:
 
 1. **Grounds first**: with everything unpowered, double-check the common ground connection between Pi, level shifter, and LED strip's 12V supply ground.
 2. **Power the 12V supply first, Pi second** (or simultaneously) — powering the Pi first with the LED strip's data line floating (level shifter unpowered) can occasionally cause the strip to flash garbage colors briefly; not damaging, just a startup glitch worth knowing about rather than being alarmed by.
-3. Once both are up, run `algaesense-edge scan-i2c` first (cheap, non-destructive) to confirm the ADS1115 shows up at 0x48 before doing anything with the LED.
+3. Once both are up, run `sudo .venv/bin/algaesense-edge scan-i2c` first (cheap, non-destructive) to confirm the ADS1115 shows up at 0x48 before doing anything with the LED.
 4. Test the LED at low brightness first (e.g. `par_per_full_duty` calibration run's first spike should be a small one) rather than commanding full brightness on the very first real test — standard practice for any new wiring, not specific to this project.
 
-## 5. Confirming the pixel count
+## 6. Confirming the pixel count
 
 `create_hardware_led(gpio_pin, num_pixels, ...)` needs the strip's actual pixel count — I don't know this number for your ALITOVE strip. Count the individually-addressable LEDs on it (usually printed on the reel or in the product listing, e.g. "60 LED/m × length"), and use that value everywhere `--led-num-pixels` appears (the CLI) or `_TEST_NUM_PIXELS` (the hardware-marked tests, which you should update to match before running `pytest -m hardware` for real).
 
-## 6. Running it for real
+## 7. A sane first-test order (don't jump straight to the full service)
+
+Each of these isolates one piece, so a failure tells you exactly where to look instead of a tangle of "it didn't work":
+
+1. `sudo .venv/bin/algaesense-edge scan-i2c` — confirms the ADS1115 responds, no LED/camera involved.
+2. A one-off Python check reading the VOC voltage directly (`create_hardware_voc_reader().read_voltage_mv()`), to confirm real sensor data before anything else touches it.
+3. The LED alone, at low brightness, via `create_hardware_led(...).set_duty_cycle(0.1)` directly, before wiring it into the full service.
+4. The camera alone — record one clip, then manually try `process_clip` on it to check for the H.264/mp4 issue above before it's buried inside a running service.
+5. Only then run the full `algaesense-edge start` below.
+
+## 8. Running it for real
 
 ```
-algaesense-edge start \
+sudo .venv/bin/algaesense-edge start \
   --experiment exp_2026-07-XX_batch01 \
   --reactor R01 \
   --sensor PID01 \

@@ -63,10 +63,18 @@ For Hermes/Slack/Anthropic setup and Pi hardware/SSH setup: see `docs/slack_and_
 
 ## Confirmed real hardware (algaesense-edge)
 
+- **Board**: Raspberry Pi 4 (confirmed 2026-07-17) — matters specifically for the LED below.
 - **VOC sensor**: Alphasense PID + ISB (analog 0-3.3V output) → **ADS1115 ADC** (Adafruit STEMMA QT), I2C address **0x48**, channel 0 (A0), single-ended.
 - **T/RH sensor**: not yet acquired. `Bme280TRHSensorReader` is a real, ready driver for when one is added — until then, `trh_reader` is `None` throughout and `sample_t_c`/`sample_rh_pct` are recorded as null (schema already supports this).
-- **LED**: WS2811 addressable RGB strip (ALITOVE), **GPIO18** (BCM), through a 74AHCT125 level shifter (3.3V→5V) + 470ohm resistor, powered from a separate 12V supply with common ground to the Pi. Driven via `adafruit-circuitpython-neopixel`, **pixel_order="BRG"** (confirmed by testing — not the library's GRB default). `num_pixels` has no default; it must match the real strip's actual count.
+- **LED**: WS2811 addressable RGB strip (ALITOVE), **GPIO18** (BCM), through a 74AHCT125 level shifter (3.3V→5V) + 470ohm resistor, powered from a separate 12V supply with common ground to the Pi. Driven via `adafruit-circuitpython-neopixel`, **pixel_order="BRG"** (confirmed by testing — not the library's GRB default). `num_pixels` has no default; it must match the real strip's actual count. `rpi_ws281x` (underneath the neopixel library) has solid, long-standing support on Pi 4's GPIO/PWM architecture — this would be a real, current concern on a Pi 5 instead (RP1 chip moved GPIO handling, older PWM+DMA libraries don't uniformly support it yet), but doesn't apply here.
 - **Camera**: Raspberry Pi Camera Module v1 (OV5647), CSI connection, via `picamera2`.
+
+## Pi-side OS/permission requirements (not just `pip install`) -- see `docs/hardware_setup.md` for the full walkthrough
+
+- **GPIO/PWM access needs root** — `rpi_ws281x` needs direct DMA/PWM hardware access; run `algaesense-edge start`/`scan-i2c` with `sudo`, using the venv's Python explicitly (`sudo .venv/bin/algaesense-edge ...`) since `sudo` resets `PATH`.
+- **Onboard audio conflicts with the LED's PWM channel** — both use the same PWM peripheral. Set `dtparam=audio=off` in `/boot/config.txt` (or `/boot/firmware/config.txt` on newer releases) and reboot before testing the LED.
+- **`picamera2` needs `sudo apt install -y python3-picamera2`**, not just the `[hardware]` pip extra — it depends on system `libcamera` bindings pip alone won't provide. If the venv can't see it, recreate the venv with `--system-site-packages`.
+- **Likely camera format mismatch, not yet fixed in code**: `picamera2`'s `H264Encoder` writes a raw H.264 elementary stream; `process_clip` reads clips via `cv2.VideoCapture`, which may not open that directly depending on the OpenCV build. Manual workaround: `ffmpeg -i clip.h264 -c copy clip.mp4` before calling `process_clip`. If this turns out to happen every time (not an edge case), fix `Picamera2CameraCapture` to write directly into `.mp4` via picamera2's `FfmpegOutput` instead of leaving this as a manual step.
 
 ## Coding conventions
 
@@ -96,7 +104,7 @@ For Hermes/Slack/Anthropic setup and Pi hardware/SSH setup: see `docs/slack_and_
 ## Standing/deferred requirements (not yet built — confirm scope before starting)
 
 - **Agent-generated LED control profiles** (ramps, sinusoidal cycles, etc., per JAXSR's DoE recommendation) — NOT a fixed profile-type library; the intended design is Hermes generating a Python control script per-experiment and it running on the Pi with results/scripts logged per run, still re-validated by `LEDActuator`'s bounds-check. Real design work, not started.
-- **Physical hardware verification** — the hardware-backed code (`voc.py`, `camera.py`, `actuators.py`, etc.) is written against confirmed real specs but has not been run on the actual Pi yet (this dev environment is a remote laptop, not the Pi). Run `pytest -m hardware` on the Pi itself once physically accessible, per `docs/hardware_setup.md`.
+- **Physical hardware verification** — the hardware-backed code (`voc.py`, `camera.py`, `actuators.py`, etc.) is written against confirmed real specs but has not been run on the actual Pi yet (this dev environment is a remote laptop, not the Pi). Run `pytest -m hardware` on the Pi itself once physically accessible, per `docs/hardware_setup.md` — which also covers several known OS-level risks (root/sudo for GPIO, onboard-audio PWM conflict, `picamera2`'s apt dependency, a likely H.264/mp4 camera format mismatch) that are real and specific to this hardware, not yet verified against it, and not fixable from this dev machine alone.
 - **`run_weekly_audit` sensor-health diagnostics are not wrapped as an MCP tool** — only the labwiki-consistency lint pass is cron-able today; wiring the diagnostics themselves in is a natural follow-up (new `mcp_diagnostics` server or an addition to `mcp_pipeline`).
 
 ## Development log
