@@ -49,6 +49,14 @@ class EdgeClient:
         response.raise_for_status()
         return response.json()
 
+    async def recent_camera_readings(self, limit: int | None = None) -> list[dict]:
+        """Fetch the most recent camera readings the edge service has buffered."""
+        response = await self._client.get(
+            "/sensors/camera/recent", params={"limit": limit} if limit is not None else None
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def set_led(self, reactor_id: str, par_umol_m2_s: float) -> dict:
         """Command a reactor's LED to a new PAR setpoint; the edge service
         validates it before applying anything."""

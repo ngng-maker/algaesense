@@ -86,6 +86,17 @@ async def test_recent_voc_readings_passes_through_the_edge_services_response() -
     await edge.close()
 
 
+async def test_recent_camera_readings_passes_through_the_edge_services_response() -> None:
+    app, state = build_real_edge_app()
+    state.record_camera_reading({"image_feature_vector": [1.0, 2.0, 3.0]})
+    edge = EdgeClient(base_url="http://fake-edge", transport=edge_transport(app))
+
+    readings = await edge.recent_camera_readings(limit=5)
+
+    assert readings == [{"image_feature_vector": [1.0, 2.0, 3.0]}]
+    await edge.close()
+
+
 @pytest.mark.hardware
 async def test_apply_led_setpoint_returns_the_edge_services_applied_value() -> None:
     """Run only on the Pi -- this is the one case in this file where the

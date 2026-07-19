@@ -34,6 +34,17 @@ mcp_servers:
     env:
       ALGAESENSE_LABWIKI_ROOT: "/path/to/algaesense/data/labwiki"
 
+  algaesense_calibration:
+    command: "algaesense-mcp-calibration"
+    env:
+      # Where in-progress guided-calibration session files live -- separate
+      # from ALGAESENSE_DATA_DIR's derived-features layout, since a session
+      # is working state, not a finished derived artifact.
+      ALGAESENSE_CALIBRATION_SESSIONS_DIR: "/path/to/algaesense/data/calibration_sessions"
+      ALGAESENSE_DATA_DIR: "/path/to/algaesense/data"
+      # Only needed for record_camera_zero_step_from_edge.
+      ALGAESENSE_EDGE_BASE_URL: "http://192.168.1.42:8000"
+
 # Slack gateway: these are Hermes's own environment variables, not
 # something algaesense-agent reads directly -- set them in whatever
 # shell/service file starts the Hermes gateway daemon, not here.

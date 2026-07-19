@@ -47,6 +47,7 @@ algaesense-mcp-pipeline = "algaesense_agent.mcp_pipeline.server:main"
 algaesense-mcp-actuators = "algaesense_agent.mcp_actuators.server:main"
 algaesense-mcp-dashboard = "algaesense_agent.dashboard.server:main"
 algaesense-mcp-labwiki = "algaesense_agent.labwiki.server:main"
+algaesense-mcp-calibration = "algaesense_agent.mcp_calibration.server:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,10 +1,10 @@
 # Hermes profile: reactor experiment assistant
 
 This directory holds everything needed to wire a real Hermes Agent
-installation up to this package's four MCP servers — none of it is
+installation up to this package's five MCP servers — none of it is
 Python code Hermes imports; Hermes only ever talks to `mcp_pipeline`,
-`mcp_actuators`, `dashboard`, and `labwiki` as external stdio subprocesses
-over the MCP protocol.
+`mcp_actuators`, `dashboard`, `labwiki`, and `mcp_calibration` as external
+stdio subprocesses over the MCP protocol.
 
 - **`system_prompt.md`** — the actual instructions for the "reactor
   experiment assistant" persona, most importantly the propose-then-confirm
