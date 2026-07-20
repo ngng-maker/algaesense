@@ -115,7 +115,20 @@ class PartitionedParquetWriter:
             """
             existing = pl.read_parquet(out_path).to_arrow().cast(self.schema)
             table = pa.concat_tables([existing, table])
-        pq.write_table(table, out_path)
+
+        """
+        Write-to-temp-then-replace, same pattern as
+        jaxsr_calibration.calibration.apply.persist_calibration and
+        diagnostics.fleet_zero._write_result -- a crash mid-write used to
+        risk leaving a truncated `hour=....parquet` file behind, which a
+        later append (the `out_path.exists()` branch above) or a reader
+        elsewhere in the pipeline would then try to read as complete.
+        `Path.replace()` is atomic on both POSIX and NTFS when source and
+        destination share a volume, which a same-directory temp file always does.
+        """
+        tmp_path = out_path.with_suffix(".parquet.tmp")
+        pq.write_table(table, tmp_path)
+        tmp_path.replace(out_path)
 
         self._buffer = []
 

@@ -35,6 +35,24 @@ class SetpointRejectedError(ValueError):
     """
 
 
+class EdgeRequestShapeError(RuntimeError):
+    """Raised when the edge service's 422 response came from FastAPI's own
+    request-body validation (a missing/mistyped field in what this client
+    sent), not from this project's own domain-level rejection
+    (SetpointRejectedError/ProfileRejectedError)."""
+
+    """
+    FastAPI's own pydantic validation errors shape `detail` as a LIST of
+    per-field error dicts (`[{"loc": [...], "msg": ..., "type": ...}, ...]`),
+    while this project's own `HTTPException(422, detail="...")` calls
+    (the real safety/shape rejections SetpointRejectedError/
+    ProfileRejectedError exist to surface) always pass a plain string.
+    Treating both shapes as the same kind of rejection would misreport a
+    bug in the request this client built as if it were the edge service's
+    safety validation correctly doing its job.
+    """
+
+
 class ProfileRejectedError(ValueError):
     """Raised when the edge service rejected a control profile as
     malformed (unknown shape, or missing/invalid parameters for its
@@ -50,6 +68,20 @@ class ProfileRejectedError(ValueError):
     client to observe that after the fact, since it happens on the edge
     service's own schedule, not in response to a request this client made.
     """
+
+
+def _raise_for_domain_rejection(response: httpx.Response, domain_error_cls: type[Exception], reactor_id: str) -> None:
+    """Raise `domain_error_cls` for a real domain-level 422 rejection
+    (string `detail`), or `EdgeRequestShapeError` for FastAPI's own
+    request-shape validation 422 (list `detail`) -- see
+    EdgeRequestShapeError's docstring for why these can't be treated the
+    same."""
+    detail = response.json().get("detail", response.text)
+    if isinstance(detail, str):
+        raise domain_error_cls(detail)
+    raise EdgeRequestShapeError(
+        f"algaesense-edge rejected the request shape for reactor {reactor_id!r}: {detail!r}"
+    )
 
 
 class EdgeClient:
@@ -88,8 +120,7 @@ class EdgeClient:
             )
 
         if response.status_code == 422:
-            detail = response.json().get("detail", response.text)
-            raise SetpointRejectedError(detail)
+            _raise_for_domain_rejection(response, SetpointRejectedError, reactor_id)
 
         response.raise_for_status()
         return response.json()
@@ -107,8 +138,7 @@ class EdgeClient:
             )
 
         if response.status_code == 422:
-            detail = response.json().get("detail", response.text)
-            raise ProfileRejectedError(detail)
+            _raise_for_domain_rejection(response, ProfileRejectedError, reactor_id)
 
         response.raise_for_status()
         return response.json()

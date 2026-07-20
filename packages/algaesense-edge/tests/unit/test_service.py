@@ -23,7 +23,7 @@ from jaxsr_calibration.calibration.config import ReactorConfig
 from algaesense_edge.acquisition.camera import create_hardware_camera_capture
 from algaesense_edge.acquisition.voc import create_hardware_voc_reader
 from algaesense_edge.actuators.actuators import LEDActuator, NeoPixelLEDHardware
-from algaesense_edge.api.state import AppState
+from algaesense_edge.api.state import ActiveControlProfile, AppState
 from algaesense_edge.service import AcquisitionService
 
 _START = dt.datetime(2026, 7, 25, 8, 0, 0, tzinfo=dt.timezone.utc)
@@ -107,6 +107,41 @@ def test_tick_rejects_an_out_of_range_profile_value_and_stops_it(tmp_path) -> No
     service = _service(tmp_path, state)
 
     results = service.tick_control_profiles(_START + dt.timedelta(seconds=90))  # 900 PAR requested, above max=500
+
+    assert results == {("R01", "led"): "rejected"}
+    assert ("R01", "led") not in state.active_control_profiles  # stopped, not left running
+    assert actuator.read_par() == 0.0  # turned off
+    assert state.last_applied_setpoint[("R01", "led")] == 0.0
+
+
+@pytest.mark.hardware
+def test_tick_isolates_a_profile_whose_evaluation_raises_instead_of_killing_the_loop(tmp_path) -> None:
+    """Regression test for a real bug: `evaluate_control_profile` used to
+    run OUTSIDE tick_control_profiles' try/except, so a profile that's
+    schema-valid at start time but fails during evaluation (e.g. bad data
+    that slipped past validate_control_profile, or corrupted state)
+    propagated an uncaught exception straight out of this method --
+    cli.py's acquisition loop has no try/except around this call, so that
+    would silently kill VOC + camera acquisition together, with the FastAPI
+    server and /health staying green throughout.
+
+    Bypasses AppState.start_control_profile (which validates up front) and
+    injects the malformed profile directly into active_control_profiles,
+    to prove tick_control_profiles defends itself even when a bad profile
+    reaches it some other way -- not just that validation catches it at
+    start time (that's test_control_profiles.py's job).
+    """
+    state = AppState()
+    actuator = _led_actuator()
+    state.led_actuators["R01"] = actuator
+    state.control_actuators[("R01", "led")] = actuator
+    state.active_control_profiles[("R01", "led")] = ActiveControlProfile(
+        profile={"shape": "step", "segments": [{"duration_s": 10.0}]},  # missing par_umol_m2_s
+        started_at=_START,
+    )
+    service = _service(tmp_path, state)
+
+    results = service.tick_control_profiles(_START + dt.timedelta(seconds=5))
 
     assert results == {("R01", "led"): "rejected"}
     assert ("R01", "led") not in state.active_control_profiles  # stopped, not left running

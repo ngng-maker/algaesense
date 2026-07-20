@@ -14,7 +14,6 @@ from jaxsr_calibration.logging_.schema import CAMERA_RAW_SCHEMA, VOC_RAW_SCHEMA
 from algaesense_edge.acquisition.camera import CameraCapture, process_clip
 from algaesense_edge.acquisition.voc import TRHSensorReader, VOCSensorReader
 from algaesense_edge.acquisition.writer import PartitionedParquetWriter
-from algaesense_edge.actuators.actuators import UnsafeSetpointError
 from algaesense_edge.actuators.control_profiles import evaluate_control_profile
 from algaesense_edge.api.state import AppState
 
@@ -196,16 +195,27 @@ class AcquisitionService:
                 continue
 
             elapsed_s = (now - active_profile.started_at).total_seconds()
-            target_value = evaluate_control_profile(active_profile.profile, elapsed_s)
 
+            """
+            `evaluate_control_profile` runs inside this same try block, not
+            before it -- a profile that's schema-valid at start time but
+            produces a bad value mid-run (e.g. a malformed step segment
+            that slipped past validate_control_profile, or any other
+            evaluation failure) must be isolated exactly like an
+            UnsafeSetpointError rejection, not left to propagate out of
+            this method and kill the whole acquisition thread (cli.py's
+            loop has no try/except around this call).
+            """
             try:
+                target_value = evaluate_control_profile(active_profile.profile, elapsed_s)
                 applied = actuator.apply_setpoint(target_value)
-            except UnsafeSetpointError:
+            except Exception:
                 """
-                A profile that ever asks for an out-of-bounds value is
-                stopped outright rather than clamped and continued -- a
-                profile whose math produces an unsafe value is a bad
-                profile, not a one-off blip to silently paper over.
+                A profile that ever asks for an out-of-bounds value, or
+                whose evaluation itself fails, is stopped outright rather
+                than clamped/skipped and continued -- a profile whose math
+                produces an unsafe or unevaluable value is a bad profile,
+                not a one-off blip to silently paper over.
                 """
                 actuator.turn_off()
                 self.state.last_applied_setpoint[(reactor_id, actuator_kind)] = 0.0

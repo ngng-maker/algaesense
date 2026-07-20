@@ -264,6 +264,23 @@ def discover_led_response_dynamics(
     candidates here with no custom BasisLibrary needed.
     """
 
+    """
+    The raw `timestamp` column is always tz-aware UTC (VOC_RAW_SCHEMA uses
+    `pa.timestamp("ns", tz="UTC")` specifically to rule out naive-timestamp
+    ambiguity -- see that schema's own module docstring). A naive
+    `since`/`until` here is genuinely ambiguous (UTC? the caller's local
+    time? something else?), and guessing UTC on the caller's behalf could
+    silently filter the wrong window -- so this raises a clear error
+    instead of guessing.
+    """
+    for name, value in (("since", since), ("until", until)):
+        if value is not None and value.tzinfo is None:
+            raise ValueError(
+                f"discover_led_response_dynamics: {name} must be timezone-aware "
+                f"(the raw timestamp column is always tz-aware UTC) -- got a naive "
+                f"datetime {value!r}, which is ambiguous about what timezone was meant."
+            )
+
     readings = load_raw_voc_readings(data_dir, experiment_id)
     readings = readings.filter(
         (pl.col("reactor_id") == reactor_id) & (pl.col("sensor_id") == sensor_id)
@@ -286,12 +303,31 @@ def discover_led_response_dynamics(
     actually-applied PAR into each row, or the LED was simply never
     actuated during this window.
     """
-    if readings["reactor_par_umol_m2_s"].null_count() == readings.height:
+    par_null_count = readings["reactor_par_umol_m2_s"].null_count()
+    if par_null_count == readings.height:
         raise ValueError(
             f"reactor_par_umol_m2_s is entirely null for reactor {reactor_id!r} in "
             f"experiment {experiment_id!r} -- either this experiment predates PAR "
             "recording being wired up, or the LED was never actuated during this "
             "window. Nothing to discover a light-response equation from."
+        )
+    """
+    A PARTIALLY-null column (some rows recorded, some not) is a distinct,
+    equally real gap: it happens when PAR recording started mid-experiment
+    (a service restart, or the fix landing partway through a long-running
+    experiment), and is worse than all-null in one way -- it wouldn't be
+    caught by the all-null check above, and would silently feed a
+    mixed-validity state variable into jaxsr.discover_dynamics, which has
+    no way to know some of those PAR values are fabricated nulls rather
+    than real recorded data.
+    """
+    if par_null_count > 0:
+        raise ValueError(
+            f"reactor_par_umol_m2_s is null for {par_null_count} of {readings.height} rows "
+            f"for reactor {reactor_id!r} in experiment {experiment_id!r} -- likely because "
+            "PAR recording started partway through this window (a service restart, or this "
+            "experiment straddling when PAR recording was first wired up). Narrow the "
+            "since/until window to a range where every row has a recorded PAR value."
         )
 
     """

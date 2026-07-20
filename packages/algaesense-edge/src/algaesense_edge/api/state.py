@@ -127,12 +127,21 @@ class AppState:
         self._camera_readings.append(row)
 
     def recent_voc_readings(self, limit: int | None = None) -> list[dict]:
+        """`limit=None` returns every buffered reading, `limit=0` returns
+        none, and a positive `limit` returns the last N -- `readings[-limit:]`
+        alone gets `limit=0` wrong (`readings[-0:]` is `readings[0:]`, the
+        WHOLE list, not an empty one), so 0 is special-cased."""
         readings = list(self._voc_readings)
-        return readings[-limit:] if limit is not None else readings
+        if limit is None:
+            return readings
+        return readings[-limit:] if limit > 0 else []
 
     def recent_camera_readings(self, limit: int | None = None) -> list[dict]:
+        """See recent_voc_readings' docstring -- same `limit=0` slicing fix."""
         readings = list(self._camera_readings)
-        return readings[-limit:] if limit is not None else readings
+        if limit is None:
+            return readings
+        return readings[-limit:] if limit > 0 else []
 
     def start_control_profile(self, reactor_id: str, actuator_kind: str, profile: dict, now: dt.datetime) -> None:
         """Validate and record a new control profile for one reactor's

@@ -59,9 +59,19 @@ def _write(sessions_dir: Path, session: CalibrationSession) -> None:
     written file, matching this project's existing YAML-writing
     convention elsewhere (persist_calibration, labwiki's raw sources).
     """
-    _session_path(sessions_dir_path, session.session_id).write_text(
-        yaml.safe_dump(asdict(session), sort_keys=False), encoding="utf-8"
-    )
+    """
+    Write-to-temp-then-`Path.replace()`, same pattern as
+    jaxsr_calibration.calibration.apply.persist_calibration -- a crash
+    mid-write used to risk leaving a truncated session YAML file behind,
+    which a later `load_session` call (or a resumed Hermes tool call mid-
+    session) would then try to parse as complete. `Path.replace()` is
+    atomic on both POSIX and NTFS when source and destination share a
+    volume, which a same-directory temp file always does.
+    """
+    session_path = _session_path(sessions_dir_path, session.session_id)
+    tmp_path = session_path.with_suffix(".yaml.tmp")
+    tmp_path.write_text(yaml.safe_dump(asdict(session), sort_keys=False), encoding="utf-8")
+    tmp_path.replace(session_path)
 
 
 def create_session(

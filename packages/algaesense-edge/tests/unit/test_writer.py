@@ -17,6 +17,7 @@ import datetime as dt
 from pathlib import Path
 
 import polars as pl
+import pyarrow.parquet as pq
 import pytest
 from jaxsr_calibration.logging_.schema import VOC_RAW_SCHEMA
 
@@ -131,3 +132,29 @@ def test_flush_with_nothing_buffered_is_a_safe_no_op(tmp_path: Path) -> None:
     writer.flush()  # nothing written yet, should not raise or create files
 
     assert not (tmp_path / "experiments").exists()
+
+
+def test_flush_never_leaves_a_partial_hour_file_after_a_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test, same shape as calibration.apply.persist_calibration's:
+    flush() used to write directly to its final hour=....parquet path, so a
+    crash mid-write could leave a truncated file behind -- which the
+    restart-append path (test_restarting_mid_hour_appends_rather_than_overwrites)
+    would then try to read as a complete, valid Parquet file."""
+    writer = _writer(tmp_path)
+    writer.write_row(_voc_row(dt.datetime(2026, 7, 15, 9, 0, 0, tzinfo=dt.timezone.utc)))
+
+    def _crash_mid_write(*args, **kwargs):
+        raise OSError("simulated crash mid-write")
+
+    monkeypatch.setattr(pq, "write_table", _crash_mid_write)
+
+    with pytest.raises(OSError, match="simulated crash mid-write"):
+        writer.flush()
+
+    hour_path = (
+        tmp_path / "experiments" / "exp_test" / "sensor_id=PID01" / "hour=2026-07-15T09.parquet"
+    )
+    assert not hour_path.exists()
+    assert list(hour_path.parent.glob("*.tmp")) == []

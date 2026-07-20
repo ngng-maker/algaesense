@@ -86,6 +86,19 @@ def test_validate_rejects_empty_step_segments() -> None:
         validate_control_profile({"shape": "step", "segments": []})
 
 
+def test_validate_rejects_step_segment_missing_par() -> None:
+    """Regression test for a real bug: a step segment missing
+    par_umol_m2_s used to pass validate_control_profile silently, then
+    raise an uncaught KeyError later when evaluate_control_profile
+    actually ran it -- inside AcquisitionService.tick_control_profiles,
+    that KeyError would have escaped the tick loop entirely and killed
+    the whole acquisition thread."""
+    with pytest.raises(ValueError, match="par_umol_m2_s"):
+        validate_control_profile(
+            {"shape": "step", "segments": [{"duration_s": 10.0}]}
+        )
+
+
 def test_validate_accepts_every_well_formed_shape() -> None:
     validate_control_profile({"shape": "constant", "par_umol_m2_s": 100.0})
     validate_control_profile({"shape": "ramp", "start_par_umol_m2_s": 0.0, "end_par_umol_m2_s": 100.0, "duration_s": 60.0})

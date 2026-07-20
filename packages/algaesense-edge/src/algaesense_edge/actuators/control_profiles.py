@@ -66,6 +66,8 @@ def validate_control_profile(profile: dict) -> None:
         if not profile["segments"]:
             raise ValueError("step profile: segments must not be empty")
         for segment in profile["segments"]:
+            if "par_umol_m2_s" not in segment:
+                raise ValueError("step profile: every segment must have par_umol_m2_s")
             if segment.get("duration_s", 0) <= 0:
                 raise ValueError("step profile: every segment's duration_s must be positive")
 

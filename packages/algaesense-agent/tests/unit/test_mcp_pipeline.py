@@ -213,10 +213,13 @@ def _write_dynamics_experiment(
     sensor_id: str = "PID01",
     n: int = 200,
     all_null_par: bool = False,
+    n_par_nulls: int = 0,
 ) -> None:
     """Write n one-second raw VOC rows for one reactor/sensor, with a known
     PAR ramp and a VOC trajectory whose true rate of change is a known
-    linear function of that PAR."""
+    linear function of that PAR. `n_par_nulls` nulls out just that many
+    leading rows' PAR (rather than every row, like `all_null_par`) --
+    simulating PAR recording starting partway through the window."""
     writer = PartitionedParquetWriter(
         base_dir=data_dir / "raw",
         experiment_id=experiment_id,
@@ -241,7 +244,7 @@ def _write_dynamics_experiment(
                 "sample_flow_sccm": None,
                 "pump_pwm": None,
                 "lamp_hours": 10.0,
-                "reactor_par_umol_m2_s": None if all_null_par else par,
+                "reactor_par_umol_m2_s": None if (all_null_par or i < n_par_nulls) else par,
                 "reactor_temp_c": None,
                 "reactor_od": None,
                 "reactor_ph": None,
@@ -276,6 +279,44 @@ def test_discover_led_response_dynamics_raises_for_all_null_par(tmp_path: Path) 
     with pytest.raises(ValueError, match="entirely null"):
         discover_led_response_dynamics(
             "exp_no_par_history", "R01", "PID01", "cal_dynamics_test", data_dir=tmp_path
+        )
+
+
+def test_discover_led_response_dynamics_raises_for_partially_null_par(tmp_path: Path) -> None:
+    """Regression test for a real gap: the old all-null-only guard would
+    have missed this case entirely -- a PARTIALLY-null PAR column (PAR
+    recording started partway through the window, e.g. a service restart
+    mid-experiment) would have silently fed a mixed-validity state
+    variable into jaxsr.discover_dynamics instead of raising a clear
+    error."""
+    _write_dynamics_experiment(tmp_path, "exp_partial_par_history", n_par_nulls=10)
+    _persist_known_calibration(tmp_path, "cal_dynamics_test")
+
+    with pytest.raises(ValueError, match="10 of 200"):
+        discover_led_response_dynamics(
+            "exp_partial_par_history", "R01", "PID01", "cal_dynamics_test", data_dir=tmp_path
+        )
+
+
+def test_discover_led_response_dynamics_raises_for_naive_since_or_until(tmp_path: Path) -> None:
+    """Regression test for a real gap: `since`/`until` used to be filtered
+    against the raw tz-aware UTC `timestamp` column with no normalization
+    or validation -- a naive datetime is genuinely ambiguous about which
+    timezone was meant, so this must raise a clear error rather than
+    silently filtering against the wrong window (or erroring deep inside
+    polars with a confusing message)."""
+    _write_dynamics_experiment(tmp_path, "exp_dynamics_test")
+    _persist_known_calibration(tmp_path, "cal_dynamics_test")
+    naive_since = dt.datetime(2026, 7, 25, 8, 0, 0)  # no tzinfo
+
+    with pytest.raises(ValueError, match="timezone-aware"):
+        discover_led_response_dynamics(
+            "exp_dynamics_test", "R01", "PID01", "cal_dynamics_test", data_dir=tmp_path, since=naive_since
+        )
+
+    with pytest.raises(ValueError, match="timezone-aware"):
+        discover_led_response_dynamics(
+            "exp_dynamics_test", "R01", "PID01", "cal_dynamics_test", data_dir=tmp_path, until=naive_since
         )
 
 

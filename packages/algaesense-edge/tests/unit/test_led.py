@@ -38,6 +38,29 @@ def _hardware() -> NeoPixelLEDHardware:
     return NeoPixelLEDHardware(gpio_pin=18, num_pixels=_TEST_NUM_PIXELS)
 
 
+class _InertLEDHardware:
+    """A bare `LEDHardware` Protocol-conforming recorder: no GPIO, no
+    simulated safety logic, just "remember the last duty cycle set."
+
+    This is NOT a stand-in for NeoPixelLEDHardware's own behavior (which
+    this project's no-mock-hardware convention rules out) -- it has no
+    behavior to stand in for. `LEDActuator.set_par`'s exact-maximum
+    boundary comparison (`>` vs `>=` against `reactor_config.max_par_umol_m2_s`)
+    is pure arithmetic that happens to sit inside a class whose OTHER
+    methods touch real hardware; this fake exists only so that one pure
+    comparison can run on every test invocation, not just on the Pi.
+    """
+
+    def __init__(self) -> None:
+        self.duty_cycle = 0.0
+
+    def set_duty_cycle(self, fraction: float) -> None:
+        self.duty_cycle = fraction
+
+    def read_duty_cycle(self) -> float:
+        return self.duty_cycle
+
+
 def test_set_par_rejects_request_above_reactor_max() -> None:
     actuator = LEDActuator(
         hardware=_hardware(), reactor_config=_reactor(max_par=500.0), par_per_full_duty_umol_m2_s=1000.0
@@ -106,8 +129,27 @@ def test_read_par_reflects_current_hardware_duty_cycle() -> None:
     assert actuator.read_par() == pytest.approx(500.0)
 
 
-@pytest.mark.hardware
 def test_set_par_at_exactly_the_maximum_is_allowed() -> None:
+    """The exact-maximum boundary comparison itself is pure arithmetic
+    (`set_par` never reaches `hardware.set_duty_cycle()` until AFTER this
+    comparison passes) -- runs against `_InertLEDHardware`, a bare
+    Protocol-conforming recorder with no simulated hardware behavior, so
+    this doesn't need @pytest.mark.hardware or the Pi to verify."""
+    hardware = _InertLEDHardware()
+    actuator = LEDActuator(
+        hardware=hardware, reactor_config=_reactor(max_par=500.0), par_per_full_duty_umol_m2_s=1000.0
+    )
+
+    applied = actuator.set_par(500.0)  # exactly at the boundary, not over it
+
+    assert applied == 500.0
+    assert hardware.duty_cycle == pytest.approx(0.5)
+
+
+@pytest.mark.hardware
+def test_set_par_at_exactly_the_maximum_is_allowed_on_real_hardware() -> None:
+    """Same boundary check as the unit test above, run for real on the Pi
+    against the actual NeoPixel strip."""
     hardware = _hardware()
     actuator = LEDActuator(
         hardware=hardware, reactor_config=_reactor(max_par=500.0), par_per_full_duty_umol_m2_s=1000.0

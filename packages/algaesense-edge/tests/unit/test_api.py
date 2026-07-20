@@ -83,6 +83,24 @@ def test_recent_voc_readings_respects_limit() -> None:
     assert [row["pid_voltage_mv"] for row in body] == [7.0, 8.0, 9.0]  # the 3 MOST RECENT
 
 
+def test_recent_voc_readings_limit_zero_returns_none_not_everything() -> None:
+    """Regression test for a real bug: `readings[-limit:]` alone gets
+    limit=0 wrong -- `readings[-0:]` is `readings[0:]`, the WHOLE list, not
+    an empty one. Called directly on AppState (not through the HTTP layer)
+    since this is pure slicing logic with no routing/serialization
+    involved."""
+    state = AppState()
+    for i in range(5):
+        state.record_voc_reading({"timestamp": dt.datetime(2026, 7, 15, 9, 0, i, tzinfo=dt.timezone.utc), "pid_voltage_mv": float(i)})
+        state.record_camera_reading({"timestamp": dt.datetime(2026, 7, 15, 9, 0, i, tzinfo=dt.timezone.utc), "image_feature_vector": [float(i)]})
+
+    assert state.recent_voc_readings(limit=0) == []
+    assert state.recent_camera_readings(limit=0) == []
+    # Sanity check the non-zero cases still behave as before this fix.
+    assert len(state.recent_voc_readings(limit=None)) == 5
+    assert len(state.recent_voc_readings(limit=2)) == 2
+
+
 def test_recent_camera_readings_returns_recorded_rows() -> None:
     state = AppState()
     state.record_camera_reading({"timestamp": dt.datetime(2026, 7, 15, 9, 0, 0, tzinfo=dt.timezone.utc), "image_feature_vector": [1.0, 2.0, 3.0]})

@@ -58,3 +58,29 @@ def test_append_step_raises_once_finished(tmp_path: Path) -> None:
 
     with pytest.raises(SessionAlreadyFinishedError):
         append_step(tmp_path, session.session_id, {"sensor_id": "PID01", "pid_voltage_mv": 1.0})
+
+
+def test_append_step_never_leaves_a_partial_session_file_after_a_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test, same shape as calibration.apply.persist_calibration's:
+    _write used to write directly to the session's final path, so a crash
+    mid-write could leave a truncated/corrupt YAML file behind -- which a
+    later load_session call (e.g. a resumed Hermes tool call mid-session)
+    would then fail to parse, or worse, parse partially."""
+    session = create_session(tmp_path, kind="reference_jar", experiment_id="exp_01", context={"sensors": ["PID01"]})
+    session_path = tmp_path / f"{session.session_id}.yaml"
+    original_contents = session_path.read_text(encoding="utf-8")
+
+    def _crash_mid_write(self: Path, *args, **kwargs):
+        raise OSError("simulated crash mid-write")
+
+    monkeypatch.setattr(Path, "write_text", _crash_mid_write)
+
+    with pytest.raises(OSError, match="simulated crash mid-write"):
+        append_step(tmp_path, session.session_id, {"sensor_id": "PID01", "pid_voltage_mv": 1.0})
+
+    # The final file is untouched -- still exactly what create_session wrote,
+    # not truncated or partially overwritten.
+    assert session_path.read_text(encoding="utf-8") == original_contents
+    assert list(tmp_path.glob("*.tmp")) == []

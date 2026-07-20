@@ -28,6 +28,7 @@ from algaesense_agent.mcp_actuators.actuators import (
 )
 from algaesense_agent.mcp_actuators.edge_client import (
     EdgeClient,
+    EdgeRequestShapeError,
     ProfileRejectedError,
     SetpointRejectedError,
     UnknownReactorError,
@@ -75,6 +76,24 @@ async def test_apply_led_setpoint_raises_when_edge_rejects_an_unsafe_setpoint() 
 
     with pytest.raises(SetpointRejectedError, match="exceeds reactor"):
         await apply_led_setpoint(edge, "R01", 9999.0)
+
+    await edge.close()
+
+
+async def test_apply_led_setpoint_raises_request_shape_error_for_a_malformed_request_body() -> None:
+    """Regression test for a real bug: a 422 whose `detail` is a LIST
+    (FastAPI's own request-body validation, e.g. `par_umol_m2_s` failing
+    to parse as a float) used to be conflated with SetpointRejectedError
+    (the edge service's own domain-level safety rejection, always a plain
+    string `detail`) -- misreporting a bug in the request this client
+    built as if it were the edge service's safety validation correctly
+    doing its job."""
+
+    app, _ = build_real_edge_app(reactor_id="R01")
+    edge = EdgeClient(base_url="http://fake-edge", transport=edge_transport(app))
+
+    with pytest.raises(EdgeRequestShapeError):
+        await apply_led_setpoint(edge, "R01", "not-a-number")  # fails pydantic's float parsing
 
     await edge.close()
 
@@ -147,6 +166,22 @@ async def test_apply_led_profile_raises_when_edge_rejects_missing_required_keys(
 
     with pytest.raises(ProfileRejectedError, match="missing required keys"):
         await apply_led_profile(edge, "R01", {"shape": "ramp"})
+
+    await edge.close()
+
+
+async def test_apply_led_profile_raises_request_shape_error_for_a_malformed_request_body() -> None:
+    """Same shape-conflation bug as apply_led_setpoint's, for the profile
+    endpoint: `profile` failing to parse as a dict at all (FastAPI's own
+    request-body validation) is a bug in the request this client built,
+    not validate_control_profile rejecting a well-formed-but-invalid
+    profile (that's ProfileRejectedError's job, string `detail`)."""
+
+    app, _ = build_real_edge_app(reactor_id="R01")
+    edge = EdgeClient(base_url="http://fake-edge", transport=edge_transport(app))
+
+    with pytest.raises(EdgeRequestShapeError):
+        await apply_led_profile(edge, "R01", "not-a-dict")  # fails pydantic's dict-type check
 
     await edge.close()
 
