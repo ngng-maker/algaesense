@@ -13,6 +13,9 @@ import polars as pl
 from jaxsr_calibration.errors import LiveAcquisitionNotAvailableError
 from jaxsr_calibration.diagnostics.models import DiagnosticStatus, FleetZeroResult, SensorStatus
 from jaxsr_calibration.processing.config import DiagnosticThresholds, FleetZeroThresholds
+from jaxsr_calibration.validation import require_columns
+
+_REQUIRED_COLUMNS = {"sensor_id", "pid_voltage_mv", "timestamp"}
 
 
 def _classify_sensor(
@@ -84,6 +87,8 @@ def run_fleet_zero(
             "run_fleet_zero has no live-acquisition backend yet; pass "
             "readings=<a DataFrame of already-collected clean-air data> instead."
         )
+
+    require_columns(readings, _REQUIRED_COLUMNS, "run_fleet_zero")
 
     limits = (thresholds or DiagnosticThresholds()).fleet_zero
 
@@ -166,6 +171,16 @@ def _write_result(result: FleetZeroResult, output_dir: Path) -> Path:
     ]
     table = pl.DataFrame(rows)
     out_path = output_dir / f"{run_id}.parquet"
-    table.write_parquet(out_path)
+
+    """
+    Write to a temp path in the same directory, then atomically rename
+    onto the final path -- same reasoning as
+    calibration.apply.persist_calibration's identical fix: a crash
+    mid-write leaves only a stray `.tmp` file, never a truncated file at
+    the real path.
+    """
+    tmp_path = output_dir / f".{run_id}.parquet.tmp"
+    table.write_parquet(tmp_path)
+    tmp_path.replace(out_path)
 
     return out_path

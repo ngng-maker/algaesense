@@ -136,36 +136,62 @@ def make_swap_pilot_readings(
     """
     rng = np.random.default_rng(seed)
     n_blocks = n_blocks or len(reactor_ids)
+    n_sensors = len(sensor_ids)
+    n_reactors = len(reactor_ids)
 
     sensor_effects = {s: rng.normal(0.0, sensor_effect_std) for s in sensor_ids}
     reactor_effects = {r: rng.normal(0.0, reactor_effect_std) for r in reactor_ids}
 
-    rows: list[dict] = []
     base_time = dt.datetime(2026, 7, 20, 8, 0, 0, tzinfo=dt.timezone.utc)
-    t = 0
-    for block in range(n_blocks):
-        for i, sensor_id in enumerate(sensor_ids):
-            # Rotate which reactor this sensor is paired with, one position
-            # per block -- the "Latin square" rotation the spec describes.
-            reactor_id = reactor_ids[(i + block) % len(reactor_ids)]
-            for _ in range(obs_per_block):
-                voltage = (
-                    baseline_mv
-                    + sensor_effects[sensor_id]
-                    + reactor_effects[reactor_id]
-                    + rng.normal(0.0, residual_std)
-                )
-                rows.append(
-                    {
-                        "timestamp": base_time + dt.timedelta(seconds=t),
-                        "sensor_id": sensor_id,
-                        "reactor_id": reactor_id,
-                        "pid_voltage_mv": voltage,
-                    }
-                )
-                t += 1
 
-    return pl.DataFrame(rows)
+    """
+    Build one row per (block, sensor, observation) as numpy arrays
+    directly, rather than accumulating a Python list of dicts one row at
+    a time. `np.repeat`/`np.tile` reproduce the exact same row ordering
+    the original triple-nested loop produced (block-major, then
+    sensor-position-within-block, then observation-within-pair) -- that
+    ordering matters here, not just for readability, since it's also what
+    determines which position in the RNG stream each row's residual
+    noise draw comes from; getting the order wrong would silently change
+    every downstream test's expected values under a fixed seed.
+    """
+    total_rows = n_blocks * n_sensors * obs_per_block
+
+    block_idx = np.repeat(np.arange(n_blocks), n_sensors)
+    sensor_idx = np.tile(np.arange(n_sensors), n_blocks)
+    reactor_idx = (sensor_idx + block_idx) % n_reactors
+
+    block_idx = np.repeat(block_idx, obs_per_block)
+    sensor_idx = np.repeat(sensor_idx, obs_per_block)
+    reactor_idx = np.repeat(reactor_idx, obs_per_block)
+
+    sensor_id_arr = np.array(sensor_ids)[sensor_idx]
+    reactor_id_arr = np.array(reactor_ids)[reactor_idx]
+
+    sensor_effect_arr = np.array([sensor_effects[s] for s in sensor_id_arr])
+    reactor_effect_arr = np.array([reactor_effects[r] for r in reactor_id_arr])
+
+    """
+    A single batched draw of `total_rows` residual samples, in row order,
+    consumes the underlying RNG stream identically to calling
+    `rng.normal(0.0, residual_std)` once per row in that same order --
+    numpy's Generator fills a requested array in C (row-major) order from
+    one continuous draw sequence, the same sequence a loop of scalar
+    calls would produce.
+    """
+    residual = rng.normal(0.0, residual_std, size=total_rows)
+    voltage = baseline_mv + sensor_effect_arr + reactor_effect_arr + residual
+
+    timestamps = [base_time + dt.timedelta(seconds=t) for t in range(total_rows)]
+
+    return pl.DataFrame(
+        {
+            "timestamp": timestamps,
+            "sensor_id": sensor_id_arr,
+            "reactor_id": reactor_id_arr,
+            "pid_voltage_mv": voltage,
+        }
+    )
 
 
 def make_standard_addition_readings(
@@ -189,35 +215,60 @@ def make_standard_addition_readings(
     rng = np.random.default_rng(seed)
     base_time = dt.datetime(2026, 7, 15, 7, 0, 0, tzinfo=dt.timezone.utc)
 
-    rows: list[dict] = []
-    t = 0
-    for sensor_id, spec in sensor_specs.items():
-        b0 = spec.get("b0_mv", 0.0)
-        b1 = spec.get("b1_mv_per_ppm", 5.0)
-        noise_std = spec.get("noise_std", 0.2)
-        for spike_ppm in spike_ppm_list:
-            for _ in range(n_per_level):
-                voltage = b0 + b1 * spike_ppm + rng.normal(0.0, noise_std)
-                rows.append(
-                    {
-                        "timestamp": base_time + dt.timedelta(seconds=t),
-                        "sensor_id": sensor_id,
-                        "spike_ppm_asgas": spike_ppm,
-                        "pid_voltage_mv": voltage,
-                        "sample_t_c": 32.0 + rng.normal(0.0, 0.1),
-                        "sample_rh_pct": 55.0 + rng.normal(0.0, 0.5),
-                        "lamp_hours": 12.0,
-                        "calibration_compound": calibration_compound,
-                        "mw_g_mol": mw_g_mol,
-                        "response_factor": response_factor,
-                        "response_factor_stderr": None,
-                        "calibration_source": "test-fixture",
-                        "calibration_is_builtin": True,
-                    }
-                )
-                t += 1
+    """
+    Built as numpy arrays directly rather than a Python list of
+    per-row dicts. The original loop drew 3 RNG samples per row, in a
+    fixed order (voltage noise, then sample_t_c noise, then
+    sample_rh_pct noise), row by row across all (sensor, spike_ppm,
+    n_per_level) combinations. `rng.normal(size=(total_rows, 3))` draws
+    the identical sequence of underlying standard-normal deviates in the
+    same row-major order (one call, filled row by row, 3 values per row)
+    -- a Generator's loc/scale reparametrizes a scale/loc-INDEPENDENT
+    standard-normal draw as `loc + scale*z`, so drawing raw unit normals
+    here and scaling each column afterward reproduces exactly what 3
+    separately-scaled scalar calls per row would have drawn, without
+    relying on any assumption about broadcasting different scales in one
+    call.
+    """
+    sensor_ids = list(sensor_specs.keys())
+    n_sensors = len(sensor_ids)
+    n_levels = len(spike_ppm_list)
+    total_rows = n_sensors * n_levels * n_per_level
 
-    return pl.DataFrame(rows)
+    sensor_idx = np.repeat(np.arange(n_sensors), n_levels * n_per_level)
+    level_idx = np.tile(np.repeat(np.arange(n_levels), n_per_level), n_sensors)
+
+    sensor_id_arr = np.array(sensor_ids)[sensor_idx]
+    spike_ppm_arr = np.array(spike_ppm_list, dtype=float)[level_idx]
+
+    b0_arr = np.array([sensor_specs[s].get("b0_mv", 0.0) for s in sensor_id_arr])
+    b1_arr = np.array([sensor_specs[s].get("b1_mv_per_ppm", 5.0) for s in sensor_id_arr])
+    noise_std_arr = np.array([sensor_specs[s].get("noise_std", 0.2) for s in sensor_id_arr])
+
+    unit_normals = rng.normal(size=(total_rows, 3))
+    voltage = b0_arr + b1_arr * spike_ppm_arr + unit_normals[:, 0] * noise_std_arr
+    sample_t_c = 32.0 + unit_normals[:, 1] * 0.1
+    sample_rh_pct = 55.0 + unit_normals[:, 2] * 0.5
+
+    timestamps = [base_time + dt.timedelta(seconds=t) for t in range(total_rows)]
+
+    return pl.DataFrame(
+        {
+            "timestamp": timestamps,
+            "sensor_id": sensor_id_arr,
+            "spike_ppm_asgas": spike_ppm_arr,
+            "pid_voltage_mv": voltage,
+            "sample_t_c": sample_t_c,
+            "sample_rh_pct": sample_rh_pct,
+            "lamp_hours": [12.0] * total_rows,
+            "calibration_compound": [calibration_compound] * total_rows,
+            "mw_g_mol": [mw_g_mol] * total_rows,
+            "response_factor": [response_factor] * total_rows,
+            "response_factor_stderr": [None] * total_rows,
+            "calibration_source": ["test-fixture"] * total_rows,
+            "calibration_is_builtin": [True] * total_rows,
+        }
+    )
 
 
 def make_common_mode_readings(

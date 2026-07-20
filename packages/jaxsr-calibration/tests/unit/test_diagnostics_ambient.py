@@ -15,6 +15,29 @@ def test_run_ambient_baseline_raises_without_readings() -> None:
         run_ambient_baseline(duration_h=12)
 
 
+def test_run_ambient_baseline_rejects_unimplemented_method_even_with_zero_sensors() -> None:
+    """Regression test for a real bug: the method guard used to live
+    inside the per-sensor loop, so an empty readings frame (zero sensors)
+    skipped the loop entirely and silently returned an empty result
+    instead of rejecting the bad method."""
+    empty = pl.DataFrame(
+        schema={"sensor_id": pl.Utf8, "sample_rh_pct": pl.Float64, "sample_t_c": pl.Float64, "pid_voltage_mv": pl.Float64, "timestamp": pl.Datetime},
+    )
+
+    with pytest.raises(NotImplementedError):
+        run_ambient_baseline(duration_h=12, method="polynomial_deg2", readings=empty)
+
+
+def test_run_ambient_baseline_robust_method_fits_a_model() -> None:
+    readings = make_ambient_readings(
+        {"PID01": {"alpha": 10.0, "beta_rh": 0.2, "gamma_t": 0.5, "delta_rh_t": 0.0}}, seed=13
+    )
+
+    result = run_ambient_baseline(duration_h=12, method="robust", readings=readings)
+
+    assert result.covariate_models["PID01"].method == "robust"
+
+
 def test_run_ambient_baseline_fits_one_model_per_sensor() -> None:
     readings = make_ambient_readings(
         {

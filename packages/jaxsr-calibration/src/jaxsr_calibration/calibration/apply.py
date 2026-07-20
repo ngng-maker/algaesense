@@ -90,9 +90,25 @@ def persist_calibration(
         }
         for model in models.values()
     ]
+    """
+    Each file is written to a temp path in the same directory, then
+    `Path.replace()`'d onto its final name -- an atomic rename on both
+    POSIX and Windows NTFS when source and destination share a volume
+    (true here, since the temp path is a sibling of the final one). A
+    crash mid-write leaves only a stray `.tmp` file behind, never a
+    truncated/corrupt file at the real path `load_calibration` reads from.
+    Each file is atomic independently, not as a coordinated pair --
+    `load_calibration` already raises a clear `FileNotFoundError` if
+    either file is missing, so a crash between the two writes produces a
+    detectable, well-defined error rather than silent corruption; true
+    two-phase-commit coordination between the pair isn't needed on top of
+    that.
+    """
     table = pl.DataFrame(rows)
     parquet_path = out_dir / f"{calibration_run_id}.parquet"
-    table.write_parquet(parquet_path)
+    tmp_parquet_path = out_dir / f".{calibration_run_id}.parquet.tmp"
+    table.write_parquet(tmp_parquet_path)
+    tmp_parquet_path.replace(parquet_path)
 
     sidecar = {
         "calibration_run_id": calibration_run_id,
@@ -108,8 +124,9 @@ def persist_calibration(
         },
     }
     yaml_path = out_dir / f"{calibration_run_id}.yaml"
+    tmp_yaml_path = out_dir / f".{calibration_run_id}.yaml.tmp"
 
-    with yaml_path.open("w", encoding="utf-8") as f:
+    with tmp_yaml_path.open("w", encoding="utf-8") as f:
         """
         `sort_keys=False` preserves the dict's own insertion order in the
         written file (calibration_run_id first, then experiment_id, etc.)
@@ -117,6 +134,7 @@ def persist_calibration(
         naturally for a human opening this file directly.
         """
         yaml.safe_dump(sidecar, f, sort_keys=False)
+    tmp_yaml_path.replace(yaml_path)
 
     return parquet_path
 

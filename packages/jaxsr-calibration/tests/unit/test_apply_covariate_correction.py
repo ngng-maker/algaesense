@@ -44,6 +44,26 @@ def test_apply_covariate_correction_passes_through_sensor_with_no_model() -> Non
     assert corrected_values == pytest.approx(raw)
 
 
+def test_apply_covariate_correction_applies_a_robust_model_not_just_ols() -> None:
+    """Regression test for a real bug the covariate work uncovered: this
+    predicate used to check `model.method != "ols"` exactly, which meant a
+    fitted "robust" model would silently never actually get applied here."""
+    readings = make_ambient_readings(
+        {"PID01": {"alpha": 10.0, "beta_rh": 0.2, "gamma_t": 0.5, "delta_rh_t": 0.0, "noise_std": 0.05}},
+        seed=63,
+    )
+    mask = pl.Series([True] * readings.height)
+    model = fit_covariate_model(readings, mask, method="robust")
+
+    corrected = apply_covariate_correction(readings, {"PID01": model})
+
+    # A correctly-applied correction should leave residuals near zero, not
+    # equal to the raw (uncorrected) voltage.
+    corrected_values = corrected["pid_voltage_mv_covariate_corrected"].to_numpy()
+    assert abs(corrected_values.mean()) < 0.5
+    assert corrected_values.std() < 0.5
+
+
 def test_apply_covariate_correction_handles_multiple_sensors_independently() -> None:
     readings = make_ambient_readings(
         {

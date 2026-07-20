@@ -9,8 +9,9 @@ import polars as pl
 
 from jaxsr_calibration.errors import LiveAcquisitionNotAvailableError
 from jaxsr_calibration.diagnostics.models import AmbientBaselineResult
-from jaxsr_calibration.processing.covariate import fit_covariate_model
+from jaxsr_calibration.processing.covariate import _IMPLEMENTED_METHODS, fit_covariate_model
 from jaxsr_calibration.processing.errors import TrainingWindowInsufficientError
+from jaxsr_calibration.validation import require_implemented_method
 
 
 def run_ambient_baseline(
@@ -40,6 +41,16 @@ def run_ambient_baseline(
             "run_ambient_baseline has no live-acquisition backend yet; pass "
             "readings=<a DataFrame of already-collected ambient-air data> instead."
         )
+
+    """
+    Checked here, before the per-sensor loop below, rather than relying on
+    fit_covariate_model's own guard to catch it on the loop's first
+    iteration -- a `readings` frame with zero sensors (e.g. an empty or
+    all-filtered-out fleet) skips that loop entirely, which would
+    otherwise let an invalid `method` pass through completely unnoticed
+    and return an empty, misleadingly-successful-looking result.
+    """
+    require_implemented_method(method, _IMPLEMENTED_METHODS, "run_ambient_baseline")
 
     covariate_models = {}
     r_squared_per_sensor: dict[str, float] = {}

@@ -13,6 +13,7 @@ import polars as pl
 import statsmodels.api as sm
 
 from jaxsr_calibration.processing.errors import TrainingWindowInsufficientError
+from jaxsr_calibration.validation import require_columns, require_implemented_method
 
 """
 Combines what used to be two files (models.py, covariate.py) --
@@ -89,6 +90,15 @@ mathematical minimum of 4 -- not a spec-mandated number, just a sanity floor.
 """
 _MIN_TRAINING_ROWS = 10
 
+"""
+`method` values this module actually has a fit implementation for --
+"symbolic" (fitting through jaxsr.SymbolicRegressor + jaxsr.Constraints
+instead of plain regression) is still real, planned, and not built yet.
+"""
+_IMPLEMENTED_METHODS = {"ols", "robust"}
+
+_REQUIRED_COLUMNS = {"sensor_id", "sample_rh_pct", "sample_t_c", "pid_voltage_mv", "timestamp"}
+
 
 def fit_covariate_model(
     df: pl.DataFrame,
@@ -110,20 +120,15 @@ def fit_covariate_model(
     ambient baseline -- the whole collection window).
     """
 
-    if method != "ols":
-        """
-        "robust" (a regression less sensitive to outliers, e.g. via
-        statsmodels' RLM) and "symbolic" (fitting through
-        jaxsr.SymbolicRegressor + jaxsr.Constraints instead of plain OLS)
-        are both real, planned features -- just not built yet. Raising
-        NotImplementedError (rather than silently falling back to "ols")
-        means a caller who explicitly asked for "robust" finds out
-        immediately rather than getting a result they didn't ask for.
-        """
-        raise NotImplementedError(
-            f"fit_covariate_model(method={method!r}) is Milestone 4 work; only "
-            "method='ols' is implemented so far."
-        )
+    """
+    "symbolic" (fitting through jaxsr.SymbolicRegressor + jaxsr.Constraints
+    instead of plain regression) is a real, planned feature -- just not
+    built yet. Raising NotImplementedError (rather than silently falling
+    back to "ols") means a caller who explicitly asked for it finds out
+    immediately rather than getting a result they didn't ask for.
+    """
+    require_implemented_method(method, _IMPLEMENTED_METHODS, "fit_covariate_model")
+    require_columns(df, _REQUIRED_COLUMNS, "fit_covariate_model")
 
     """
     Boolean-index the polars DataFrame down to just the training rows.
@@ -184,34 +189,49 @@ def fit_covariate_model(
     """
     design = sm.add_constant(design)
 
-    """
-    `sm.OLS(y, X).fit()` is statsmodels' ordinary-least-squares regression:
-    it solves for the coefficient vector that minimizes squared error
-    between `design @ coefficients` and `voltage`, and also computes
-    standard errors/covariance/R^2 as a side effect -- all of which we use
-    below rather than re-deriving them by hand.
-    """
-    result = sm.OLS(voltage, design, missing="drop").fit()
-    alpha, beta_rh, gamma_t, delta_rh_t = result.params
+    if method == "ols":
+        """
+        `sm.OLS(y, X).fit()` is statsmodels' ordinary-least-squares
+        regression: it solves for the coefficient vector that minimizes
+        squared error between `design @ coefficients` and `voltage`, and
+        also computes standard errors/covariance/R^2 as a side effect --
+        all of which we use below rather than re-deriving them by hand.
+        """
+        result = sm.OLS(voltage, design, missing="drop").fit()
+        alpha, beta_rh, gamma_t, delta_rh_t = result.params
+        covariance = np.asarray(result.cov_params())
+        r_squared = float(result.rsquared)
+    else:
+        """
+        `sm.RLM` (robust linear model, Huber norm by default) downweights
+        the influence of outlier readings rather than letting a single bad
+        sample pull the fit the way plain least-squares would. It doesn't
+        expose `.rsquared`/`.cov_params()` the same way OLS does, so both
+        are computed by hand here from the fitted line, keeping
+        `CovariateModel`'s fields meaningful regardless of which method
+        produced them.
+        """
+        result = sm.RLM(voltage, design, missing="drop").fit()
+        alpha, beta_rh, gamma_t, delta_rh_t = result.params
+        covariance = np.asarray(result.bcov_scaled)
+        predicted = design @ result.params
+        ss_res = float(np.sum((voltage - predicted) ** 2))
+        ss_tot = float(np.sum((voltage - np.mean(voltage)) ** 2))
+        r_squared = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
 
     training_timestamps = training_df["timestamp"].to_list()
 
-    """
-    `result.cov_params()` returns a pandas/numpy 4x4 covariance matrix
-    already aligned with [const, RH, T, RH*T] -- `np.asarray(...)` only
-    matters if statsmodels handed back a DataFrame rather than a raw array.
-    """
     return CovariateModel(
         sensor_id=sensor_id,
-        method="ols",
+        method=method,
         alpha=float(alpha),
         beta_rh=float(beta_rh),
         gamma_t=float(gamma_t),
         delta_rh_t=float(delta_rh_t),
-        covariance=np.asarray(result.cov_params()),
+        covariance=covariance,
         symbolic_regressor=None,
         training_window=(min(training_timestamps), max(training_timestamps)),
-        r_squared=float(result.rsquared),
+        r_squared=r_squared,
     )
 
 
@@ -233,15 +253,22 @@ def apply_covariate_correction(df: pl.DataFrame, models: dict[str, CovariateMode
     covariate correction for one sensor shouldn't discard its raw data.
     """
 
+    require_columns(df, {"sensor_id", "sample_rh_pct", "sample_t_c", "pid_voltage_mv"}, "apply_covariate_correction")
+
     corrected_frames = []
     for (sensor_id,), sensor_df in df.partition_by("sensor_id", as_dict=True).items():
         model = models.get(sensor_id)
-        if model is None or model.method != "ols":
+        if model is None or model.method not in ("ols", "robust"):
             """
             No fitted model for this sensor (or it's a "symbolic" model,
             which this function doesn't yet know how to evaluate -- that's
             deferred until jaxsr.SymbolicRegressor integration is built) --
             pass the raw voltage through unchanged rather than erroring.
+            `ols` and `robust` models share the same linear
+            alpha/beta_rh/gamma_t/delta_rh_t shape, so both are evaluated
+            the same way below -- this predicate previously only matched
+            "ols" exactly, which meant a fitted "robust" model would
+            silently never actually get applied here.
             """
             corrected = sensor_df["pid_voltage_mv"]
         else:

@@ -57,3 +57,8 @@ def test_compute_fleet_ratios_rejects_zero_fleet_median() -> None:
 
     with pytest.raises(ValueError, match="median reading is exactly 0"):
         compute_fleet_ratios(readings)
+
+
+def test_compute_fleet_ratios_rejects_readings_missing_required_columns() -> None:
+    with pytest.raises(ValueError, match="compute_fleet_ratios"):
+        compute_fleet_ratios(pl.DataFrame({"sensor_id": ["PID01"]}))

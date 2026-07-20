@@ -11,6 +11,9 @@ import statsmodels.formula.api as smf
 
 from jaxsr_calibration.errors import LiveAcquisitionNotAvailableError
 from jaxsr_calibration.diagnostics.models import SwapPilotResult
+from jaxsr_calibration.validation import require_columns
+
+_REQUIRED_COLUMNS = {"sensor_id", "reactor_id", "pid_voltage_mv"}
 
 
 def run_swap_pilot(
@@ -47,6 +50,8 @@ def run_swap_pilot(
             "run_swap_pilot has no live-acquisition backend yet; pass "
             "readings=<a DataFrame spanning the swap-pilot rotation> instead."
         )
+
+    require_columns(readings, _REQUIRED_COLUMNS, "run_swap_pilot")
 
     """
     statsmodels' formula API (`smf.mixedlm`) works on pandas DataFrames,

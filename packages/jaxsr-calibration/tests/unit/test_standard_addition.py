@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import polars as pl
 import pytest
 
 from jaxsr_calibration.errors import LiveAcquisitionNotAvailableError
@@ -20,6 +21,20 @@ def test_run_standard_addition_always_needs_live_acquisition() -> None:
             experiment_id="exp_test",
             calibration_gas=gas,
             spike_ppm_list=[0.0, 1.0, 5.0, 20.0],
+        )
+
+
+def test_run_standard_addition_rejects_unimplemented_method_before_the_live_acquisition_raise() -> None:
+    """The method guard fires first, even though this function always
+    raises LiveAcquisitionNotAvailableError afterward -- so a caller with a
+    typo'd method finds out about THAT, not a misleading hardware error."""
+    gas = CalibrationGas.builtin("isoprene")
+    with pytest.raises(NotImplementedError):
+        run_standard_addition(
+            experiment_id="exp_test",
+            calibration_gas=gas,
+            spike_ppm_list=[0.0, 1.0, 5.0, 20.0],
+            method="polynomial_deg2",
         )
 
 
@@ -97,6 +112,11 @@ def test_fit_sensitivity_per_sensor_flags_poor_fit_as_fail() -> None:
     assert models["PID01"].status == "FAIL"
 
 
+def test_fit_sensitivity_per_sensor_rejects_readings_missing_required_columns() -> None:
+    with pytest.raises(ValueError, match="fit_sensitivity_per_sensor"):
+        fit_sensitivity_per_sensor(pl.DataFrame({"sensor_id": ["PID01"]}))
+
+
 def test_fit_sensitivity_per_sensor_requires_at_least_two_spike_levels() -> None:
     df = make_standard_addition_readings(
         {"PID01": {"b0_mv": 1.0, "b1_mv_per_ppm": 4.0}},
@@ -133,6 +153,40 @@ def test_fit_sensitivity_per_sensor_rejects_unimplemented_methods() -> None:
     df = make_standard_addition_readings(
         {"PID01": {"b0_mv": 1.0, "b1_mv_per_ppm": 4.0}}, spike_ppm_list=[0.0, 5.0], seed=37
     )
-    for method in ("robust", "polynomial_deg2"):
-        with pytest.raises(NotImplementedError):
-            fit_sensitivity_per_sensor(df, method=method)
+    with pytest.raises(NotImplementedError):
+        fit_sensitivity_per_sensor(df, method="polynomial_deg2")
+
+
+def test_fit_sensitivity_per_sensor_robust_recovers_known_line() -> None:
+    df = make_standard_addition_readings(
+        {"PID01": {"b0_mv": 2.0, "b1_mv_per_ppm": 4.0, "noise_std": 0.1}},
+        spike_ppm_list=[0.0, 1.0, 5.0, 20.0],
+        seed=38,
+    )
+
+    model = fit_sensitivity_per_sensor(df, method="robust")["PID01"]
+
+    assert model.fit_method == "robust"
+    assert model.b0_mv == pytest.approx(2.0, abs=0.3)
+    assert model.b1_mv_per_ppm_asgas == pytest.approx(4.0, abs=0.2)
+    assert model.r_squared > 0.99
+
+
+def test_fit_sensitivity_per_sensor_ols_and_robust_diverge_on_an_outlier() -> None:
+    """The real point of shipping `robust` at all: it should be
+    meaningfully less pulled by a single bad reading than `ols` is."""
+    df = make_standard_addition_readings(
+        {"PID01": {"b0_mv": 2.0, "b1_mv_per_ppm": 4.0, "noise_std": 0.05}},
+        spike_ppm_list=[0.0, 1.0, 5.0, 20.0],
+        seed=39,
+    )
+    # Inject one wild outlier reading at the highest spike level.
+    outlier = pl.DataFrame([{**row, "pid_voltage_mv": row["pid_voltage_mv"] + 500.0} for row in df.tail(1).to_dicts()])
+    df_with_outlier = pl.concat([df, outlier])
+
+    ols_model = fit_sensitivity_per_sensor(df_with_outlier, method="ols")["PID01"]
+    robust_model = fit_sensitivity_per_sensor(df_with_outlier, method="robust")["PID01"]
+
+    # True slope is 4.0 -- robust should land much closer to it than OLS,
+    # which the single extreme point drags far off.
+    assert abs(robust_model.b1_mv_per_ppm_asgas - 4.0) < abs(ols_model.b1_mv_per_ppm_asgas - 4.0)

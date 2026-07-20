@@ -7,9 +7,11 @@ from __future__ import annotations
 import numpy as np
 import polars as pl
 import statsmodels.api as sm
+from scipy import stats as scipy_stats
 
 from jaxsr_calibration.errors import LiveAcquisitionNotAvailableError
 from jaxsr_calibration.calibration.models import CalibrationGas, SensitivityModel
+from jaxsr_calibration.validation import require_columns, require_implemented_method
 
 
 """
@@ -48,6 +50,14 @@ _REQUIRED_COLUMNS = {
     "response_factor",
 }
 
+"""
+`method` values this module actually has a fit implementation for --
+checked at the earliest reachable point in each function below (before any
+live-acquisition raise or per-sensor loop), not merely wherever a fit is
+eventually attempted.
+"""
+_IMPLEMENTED_METHODS = {"ols", "robust"}
+
 
 def run_standard_addition(
     experiment_id: str,
@@ -71,6 +81,16 @@ def run_standard_addition(
     some other means), call fit_sensitivity_per_sensor(df, method=...)
     directly -- that part is fully implemented.
     """
+
+    """
+    Guarded even though this function is currently a stub that always
+    raises below regardless of method -- so an invalid method name is
+    named correctly the day algaesense_edge exists and this stub is
+    replaced with a real implementation, rather than this param being
+    silently inert until then.
+    """
+    require_implemented_method(method, _IMPLEMENTED_METHODS, "run_standard_addition")
+
     raise LiveAcquisitionNotAvailableError(
         "run_standard_addition needs to drive an interactive, live spike-and-"
         "recover procedure (needs algaesense-edge, a later phase). If you "
@@ -91,15 +111,8 @@ def fit_sensitivity_per_sensor(df: pl.DataFrame, method: str = "ols") -> dict[st
     calibration_compound/mw_g_mol/response_factor(_stderr).
     """
 
-    if method != "ols":
-        raise NotImplementedError(
-            f"fit_sensitivity_per_sensor(method={method!r}) is not implemented yet; "
-            "only method='ols' is available so far."
-        )
-
-    missing = _REQUIRED_COLUMNS - set(df.columns)
-    if missing:
-        raise ValueError(f"fit_sensitivity_per_sensor: df is missing required columns: {sorted(missing)}")
+    require_implemented_method(method, _IMPLEMENTED_METHODS, "fit_sensitivity_per_sensor")
+    require_columns(df, _REQUIRED_COLUMNS, "fit_sensitivity_per_sensor")
 
     results: dict[str, SensitivityModel] = {}
 
@@ -114,16 +127,37 @@ def fit_sensitivity_per_sensor(df: pl.DataFrame, method: str = "ols") -> dict[st
                 f"{sorted(set(spike_ppm.tolist()))}."
             )
 
-        design = sm.add_constant(spike_ppm)
-        result = sm.OLS(voltage, design).fit()
-        b0, b1 = result.params
+        if method == "ols":
+            design = sm.add_constant(spike_ppm)
+            result = sm.OLS(voltage, design).fit()
+            b0, b1 = result.params
 
-        """
-        `result.bse` ("basic standard errors") has one entry per
-        coefficient in the same order as `result.params` -- index 1 is the
-        slope's standard error, matching b1 at index 1.
-        """
-        b1_stderr = float(result.bse[1])
+            """
+            `result.bse` ("basic standard errors") has one entry per
+            coefficient in the same order as `result.params` -- index 1 is
+            the slope's standard error, matching b1 at index 1.
+            """
+            b1_stderr = float(result.bse[1])
+            r_squared = float(result.rsquared)
+        else:
+            """
+            Theil-Sen: a median-of-pairwise-slopes estimator, far less
+            sensitive to a single bad outlier reading than OLS's
+            least-squares fit. `scipy.stats.theilslopes` returns a 95%
+            confidence interval on the slope by default; deriving a
+            stderr-equivalent from its half-width keeps `SensitivityModel`'s
+            existing `b1_stderr` field meaningful regardless of which
+            method produced it, rather than adding a second, method-specific
+            uncertainty field.
+            """
+            slope, intercept, low_slope, high_slope = scipy_stats.theilslopes(voltage, spike_ppm)
+            b0, b1 = intercept, slope
+            b1_stderr = float((high_slope - low_slope) / (2 * 1.96))
+
+            predicted = b0 + b1 * spike_ppm
+            ss_res = float(np.sum((voltage - predicted) ** 2))
+            ss_tot = float(np.sum((voltage - np.mean(voltage)) ** 2))
+            r_squared = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
 
         gas = _reconstruct_calibration_gas(sensor_df, sensor_id)
         b1_iso_equiv = b1 * gas.response_factor if gas.has_rf else None
@@ -135,12 +169,12 @@ def fit_sensitivity_per_sensor(df: pl.DataFrame, method: str = "ols") -> dict[st
             b1_mv_per_ppm_asgas=float(b1),
             b1_mv_per_ppm_iso_equiv=b1_iso_equiv,
             b1_stderr=b1_stderr,
-            r_squared=float(result.rsquared),
-            fit_method="ols",
+            r_squared=r_squared,
+            fit_method=method,
             mean_sample_t_c=float(sensor_df["sample_t_c"].mean()),
             mean_sample_rh_pct=float(sensor_df["sample_rh_pct"].mean()),
             lamp_hours=float(sensor_df["lamp_hours"].max()),
-            status=_classify(float(result.rsquared)),
+            status=_classify(r_squared),
         )
 
     return results

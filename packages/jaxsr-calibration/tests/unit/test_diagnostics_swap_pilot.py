@@ -28,6 +28,13 @@ def test_run_swap_pilot_raises_without_readings() -> None:
         run_swap_pilot(n_blocks=4, block_hours=4)
 
 
+def test_run_swap_pilot_rejects_readings_missing_required_columns() -> None:
+    import polars as pl
+
+    with pytest.raises(ValueError, match="run_swap_pilot"):
+        run_swap_pilot(readings=pl.DataFrame({"sensor_id": ["PID01"]}))
+
+
 def test_run_swap_pilot_variance_shares_sum_to_one() -> None:
     readings = make_swap_pilot_readings(
         _SENSORS, _REACTORS, sensor_effect_std=3.0, reactor_effect_std=2.0, residual_std=5.0, seed=20

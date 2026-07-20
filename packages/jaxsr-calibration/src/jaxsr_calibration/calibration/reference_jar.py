@@ -9,6 +9,7 @@ import polars as pl
 
 from jaxsr_calibration.errors import LiveAcquisitionNotAvailableError
 from jaxsr_calibration.calibration.models import CalibrationGas
+from jaxsr_calibration.validation import require_columns
 
 
 """
@@ -57,6 +58,8 @@ def compute_fleet_ratios(readings: pl.DataFrame, value_column: str = "pid_voltag
 
     if readings.height == 0:
         raise ValueError("compute_fleet_ratios: readings is empty")
+
+    require_columns(readings, {"sensor_id", value_column}, "compute_fleet_ratios")
 
     """
     `.group_by("sensor_id").agg(...)` collapses possibly-multiple rows per

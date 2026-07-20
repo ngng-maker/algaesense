@@ -21,6 +21,11 @@ def test_run_fleet_zero_raises_without_readings() -> None:
         run_fleet_zero(duration_min=60)
 
 
+def test_run_fleet_zero_rejects_readings_missing_required_columns() -> None:
+    with pytest.raises(ValueError, match="run_fleet_zero"):
+        run_fleet_zero(duration_min=60, readings=pl.DataFrame({"sensor_id": ["PID01"]}))
+
+
 def test_run_fleet_zero_all_healthy_sensors_are_green() -> None:
     readings = make_fleet_readings(
         {
@@ -98,3 +103,26 @@ def test_run_fleet_zero_writes_parquet_when_output_dir_given(tmp_path: Path) -> 
     assert len(written) == 1
     table = pl.read_parquet(written[0])
     assert table["sensor_id"].to_list() == ["PID01"]
+    assert list(out_dir.glob("*.tmp")) == []
+
+
+def test_run_fleet_zero_never_leaves_a_partial_result_file_after_a_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test, same shape as calibration.apply.persist_calibration's:
+    _write_result used to write directly to its final path, so a crash
+    mid-write could leave a truncated file behind."""
+    readings = make_fleet_readings(
+        {"PID01": {"mean_mv": 0.5, "std_mv": 0.1, "slope_mv_per_min": 0.0}}, seed=6
+    )
+    out_dir = tmp_path / "diagnostics" / "fleet_zero"
+
+    def _crash_mid_write(self: pl.DataFrame, *args, **kwargs):
+        raise OSError("simulated crash mid-write")
+
+    monkeypatch.setattr(pl.DataFrame, "write_parquet", _crash_mid_write)
+
+    with pytest.raises(OSError, match="simulated crash mid-write"):
+        run_fleet_zero(duration_min=5, readings=readings, output_dir=out_dir)
+
+    assert list(out_dir.glob("*.parquet")) == []

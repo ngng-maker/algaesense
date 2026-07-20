@@ -104,6 +104,14 @@ def test_fit_covariate_model_raises_on_too_few_rows() -> None:
         fit_covariate_model(df, mask)
 
 
+def test_fit_covariate_model_rejects_readings_missing_required_columns() -> None:
+    df = pl.DataFrame({"sensor_id": ["PID01"], "timestamp": [dt.datetime(2026, 7, 1, tzinfo=dt.timezone.utc)]})
+    mask = pl.Series([True])
+
+    with pytest.raises(ValueError, match="fit_covariate_model"):
+        fit_covariate_model(df, mask)
+
+
 def test_fit_covariate_model_rejects_multi_sensor_data() -> None:
     df1 = _synthetic_covariate_df(sensor_id="PID01")
     df2 = _synthetic_covariate_df(sensor_id="PID02", seed=1)
@@ -115,10 +123,42 @@ def test_fit_covariate_model_rejects_multi_sensor_data() -> None:
         fit_covariate_model(combined, mask)
 
 
-def test_fit_covariate_model_robust_and_symbolic_not_implemented_yet() -> None:
+def test_fit_covariate_model_symbolic_not_implemented_yet() -> None:
     df = _synthetic_covariate_df()
     mask = pl.Series([True] * df.height)
 
-    for method in ("robust", "symbolic"):
-        with pytest.raises(NotImplementedError):
-            fit_covariate_model(df, mask, method=method)
+    with pytest.raises(NotImplementedError):
+        fit_covariate_model(df, mask, method="symbolic")
+
+
+def test_fit_covariate_model_robust_recovers_known_coefficients() -> None:
+    true_alpha, true_beta_rh, true_gamma_t, true_delta = 10.0, 0.2, 0.5, 0.01
+    df = _synthetic_covariate_df(
+        alpha=true_alpha, beta_rh=true_beta_rh, gamma_t=true_gamma_t, delta_rh_t=true_delta
+    )
+    mask = pl.Series([True] * df.height)
+
+    model = fit_covariate_model(df, mask, method="robust", min_rh_range_pct=20.0)
+
+    assert model is not None
+    assert model.method == "robust"
+    assert model.alpha == pytest.approx(true_alpha, abs=0.5)
+    assert model.beta_rh == pytest.approx(true_beta_rh, abs=0.05)
+    assert model.gamma_t == pytest.approx(true_gamma_t, abs=0.05)
+    assert model.delta_rh_t == pytest.approx(true_delta, abs=0.01)
+    assert model.r_squared > 0.95
+    assert model.covariance.shape == (4, 4)
+    assert model.symbolic_regressor is None
+
+
+def test_fit_covariate_model_ols_and_robust_diverge_on_an_outlier() -> None:
+    df = _synthetic_covariate_df(seed=5)
+    # Inject one wild outlier reading.
+    outlier = pl.DataFrame([{**df.tail(1).to_dicts()[0], "pid_voltage_mv": df["pid_voltage_mv"][-1] + 500.0}])
+    df_with_outlier = pl.concat([df, outlier])
+    mask = pl.Series([True] * df_with_outlier.height)
+
+    ols_model = fit_covariate_model(df_with_outlier, mask, method="ols")
+    robust_model = fit_covariate_model(df_with_outlier, mask, method="robust")
+
+    assert abs(robust_model.alpha - 10.0) < abs(ols_model.alpha - 10.0)

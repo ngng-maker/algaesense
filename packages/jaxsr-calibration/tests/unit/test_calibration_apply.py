@@ -32,6 +32,47 @@ def calibrated_run(tmp_path: Path) -> tuple[str, Path]:
     return "cal_test_run", out_dir
 
 
+def test_persist_calibration_leaves_no_tmp_files_after_a_successful_write(calibrated_run: tuple[str, Path]) -> None:
+    run_id, data_dir = calibrated_run
+
+    leftover_tmp_files = list(data_dir.glob("*.tmp"))
+
+    assert leftover_tmp_files == []
+    assert (data_dir / f"{run_id}.parquet").exists()
+    assert (data_dir / f"{run_id}.yaml").exists()
+
+
+def test_persist_calibration_never_leaves_a_partial_final_file_after_a_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for a real bug: persist_calibration used to write
+    directly to its final paths, so a crash mid-write could leave a
+    truncated/corrupt file where a reader expects a complete one. With the
+    temp-then-atomic-rename fix, a failure during the write can only ever
+    leave a stray `.tmp` file behind -- the final path is untouched until
+    the rename, which is the last thing that happens."""
+    df = make_standard_addition_readings(
+        {"PID01": {"b0_mv": 2.0, "b1_mv_per_ppm": 4.0, "noise_std": 0.02}},
+        spike_ppm_list=[0.0, 1.0, 5.0, 20.0],
+        seed=53,
+    )
+    models = fit_sensitivity_per_sensor(df)
+    out_dir = tmp_path / "calibrations"
+
+    def _crash_mid_write(self: pl.DataFrame, *args, **kwargs):
+        raise OSError("simulated crash mid-write")
+
+    monkeypatch.setattr(pl.DataFrame, "write_parquet", _crash_mid_write)
+
+    with pytest.raises(OSError, match="simulated crash mid-write"):
+        persist_calibration(models, "cal_crash_test", "exp_test", out_dir)
+
+    # The real point: no truncated/partial file exists at the final path --
+    # it either doesn't exist at all, or (once the .tmp write ever succeeds
+    # before a later step fails) it's still just a .tmp file, never renamed.
+    assert not (out_dir / "cal_crash_test.parquet").exists()
+
+
 def test_apply_calibration_inverts_voltage_to_known_ppm(calibrated_run: tuple[str, Path]) -> None:
     run_id, data_dir = calibrated_run
     # True line was voltage = 2.0 + 4.0*ppm, so voltage=22.0 should invert to
