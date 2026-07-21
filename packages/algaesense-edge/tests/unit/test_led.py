@@ -21,6 +21,7 @@ from algaesense_edge.actuators.actuators import (
     UnsafeSetpointError,
     create_hardware_led,
 )
+from tests.conftest import hardware_extra_importable
 
 """
 Placeholder pixel count for constructing NeoPixelLEDHardware in tests
@@ -99,6 +100,9 @@ def test_neopixel_hardware_fails_clearly_without_hardware_extra_installed() -> N
     needs) isn't installed on this dev machine -- the first actual
     hardware call should fail with a clear, actionable ImportError.
     """
+    if hardware_extra_importable("board", "neopixel"):
+        pytest.skip("board/neopixel are installed in this environment (e.g. on the Pi) -- "
+                     "this test only verifies the ImportError path when they're absent.")
     hardware = _hardware()
     with pytest.raises(ImportError, match="hardware"):
         hardware.set_duty_cycle(0.5)

@@ -22,6 +22,7 @@ from algaesense_edge.acquisition.camera import (
     create_hardware_camera_capture,
     process_clip,
 )
+from tests.conftest import hardware_extra_importable
 
 
 def _write_solid_color_clip(
@@ -93,6 +94,9 @@ def test_picamera2_capture_fails_clearly_without_hardware_extra_installed(tmp_pa
     attached even when installed) -- the first actual recording attempt
     should fail with a clear, actionable ImportError.
     """
+    if hardware_extra_importable("picamera2"):
+        pytest.skip("picamera2 is installed in this environment (e.g. on the Pi) -- "
+                     "this test only verifies the ImportError path when it's absent.")
     capture = Picamera2CameraCapture()
     with pytest.raises(ImportError, match="hardware"):
         capture.record_clip(duration_s=1.0, frame_rate_fps=10.0, out_path=tmp_path / "clip.h264")

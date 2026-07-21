@@ -17,6 +17,7 @@ from algaesense_edge.acquisition.voc import (
     create_hardware_trh_reader,
     create_hardware_voc_reader,
 )
+from tests.conftest import hardware_extra_importable
 
 
 def test_create_hardware_voc_reader_returns_a_real_ads1115_reader() -> None:
@@ -41,12 +42,18 @@ def test_ads1115_reader_read_fails_clearly_without_hardware_extra_installed() ->
     actual read attempt should fail with a clear, actionable ImportError,
     not a confusing traceback deep inside some other module.
     """
+    if hardware_extra_importable("board", "busio"):
+        pytest.skip("board/busio are installed in this environment (e.g. on the Pi) -- "
+                     "this test only verifies the ImportError path when they're absent.")
     reader = Ads1115VOCSensorReader()
     with pytest.raises(ImportError, match="hardware"):
         reader.read_voltage_mv()
 
 
 def test_bme280_reader_read_fails_clearly_without_hardware_extra_installed() -> None:
+    if hardware_extra_importable("board", "busio"):
+        pytest.skip("board/busio are installed in this environment (e.g. on the Pi) -- "
+                     "this test only verifies the ImportError path when they're absent.")
     reader = Bme280TRHSensorReader()
     with pytest.raises(ImportError, match="hardware"):
         reader.read_temperature_c()

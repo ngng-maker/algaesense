@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from algaesense_edge.acquisition.i2c import scan_i2c
+from tests.conftest import hardware_extra_importable
 
 
 def test_scan_i2c_raises_clear_error_without_hardware_extra() -> None:
@@ -17,6 +18,9 @@ def test_scan_i2c_raises_clear_error_without_hardware_extra() -> None:
     # optional 'hardware' extra -- see pyproject.toml) -- scan_i2c should
     # fail with a clear, actionable ImportError rather than a confusing
     # traceback deep inside some other module.
+    if hardware_extra_importable("smbus2"):
+        pytest.skip("smbus2 is installed in this environment (e.g. on the Pi) -- "
+                     "this test only verifies the ImportError path when it's absent.")
     with pytest.raises(ImportError, match="hardware"):
         scan_i2c()
 
