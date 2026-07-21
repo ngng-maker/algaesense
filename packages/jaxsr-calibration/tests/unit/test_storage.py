@@ -75,6 +75,28 @@ def test_get_storage_backend_builds_local_backend(tmp_path: Path) -> None:
     assert backend.root_dir == tmp_path
 
 
+def test_get_storage_backend_builds_sftp_backend(tmp_path: Path) -> None:
+    pytest.importorskip("paramiko", reason="paramiko (the 'sftp' extra) isn't installed in this environment")
+    from jaxsr_calibration.storage.sftp_backend import SftpStorageBackend
+
+    key_path = tmp_path / "key"
+    key_path.write_text("not a real key, just needs to exist for this constructor")
+
+    backend = get_storage_backend(
+        {
+            "backend": "sftp",
+            "sftp_host": "127.0.0.1",
+            "sftp_username": "tester",
+            "sftp_private_key_path": str(key_path),
+            "sftp_remote_root_dir": "/data",
+        }
+    )
+
+    assert isinstance(backend, SftpStorageBackend)
+    assert backend.host == "127.0.0.1"
+    assert backend.port == 22
+
+
 def test_get_storage_backend_rejects_unknown_backend_name() -> None:
     with pytest.raises(ValueError, match="Unknown storage backend"):
         get_storage_backend({"backend": "dropbox"})

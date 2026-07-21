@@ -46,6 +46,12 @@ click
 # which needs no new dependency at all.)
 firebase-admin
 
+# ---- Optional: only on machines using the SFTP remote-storage backend ----
+# (jaxsr-calibration's "sftp" extra -- pushes files directly onto another
+# machine over SSH, e.g. the Pi pushing onto an operator's laptop, with no
+# cloud account needed. See docs/remote_storage_setup.md.)
+paramiko
+
 # ---- algaesense-edge, non-hardware part (any machine running the edge API) ----
 fastapi
 uvicorn

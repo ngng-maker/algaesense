@@ -271,14 +271,21 @@ def main() -> None:
     parser.add_argument("--experiment-id", default=None, help="Sync/ingest only this experiment (default: every experiment found)")
     parser.add_argument(
         "--storage-backend",
-        choices=["none", "local", "firebase"],
+        choices=["none", "local", "firebase", "sftp"],
         default="none",
         help="Pull raw files from this remote backend into --data-dir before ingesting, "
-        "instead of assuming --data-dir already has them (e.g. via a manual scp copy).",
+        "instead of assuming --data-dir already has them (e.g. via a manual scp copy). "
+        "Not needed at all if the Pi already pushes straight onto this machine via its "
+        "own --storage-backend=sftp -- files just show up locally in that case.",
     )
     parser.add_argument("--storage-local-root", default=None, help="Required if --storage-backend=local")
     parser.add_argument("--storage-firebase-credentials", default=None, help="Required if --storage-backend=firebase")
     parser.add_argument("--storage-firebase-bucket", default=None, help="Required if --storage-backend=firebase")
+    parser.add_argument("--storage-sftp-host", default=None, help="Required if --storage-backend=sftp")
+    parser.add_argument("--storage-sftp-port", type=int, default=22, help="Only used if --storage-backend=sftp")
+    parser.add_argument("--storage-sftp-username", default=None, help="Required if --storage-backend=sftp")
+    parser.add_argument("--storage-sftp-private-key", default=None, help="Required if --storage-backend=sftp")
+    parser.add_argument("--storage-sftp-remote-root", default=None, help="Required if --storage-backend=sftp")
     args = parser.parse_args()
 
     backend = get_storage_backend(
@@ -287,6 +294,11 @@ def main() -> None:
             "local_root_dir": args.storage_local_root,
             "firebase_credentials_path": args.storage_firebase_credentials,
             "firebase_bucket_name": args.storage_firebase_bucket,
+            "sftp_host": args.storage_sftp_host,
+            "sftp_port": args.storage_sftp_port,
+            "sftp_username": args.storage_sftp_username,
+            "sftp_private_key_path": args.storage_sftp_private_key,
+            "sftp_remote_root_dir": args.storage_sftp_remote_root,
         }
     )
 

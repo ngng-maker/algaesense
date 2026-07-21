@@ -27,7 +27,7 @@ small interface, `jaxsr_calibration.storage.RemoteStorageBackend`
 
 That's the whole contract. Nothing else in the codebase — not the
 Pi-side writer, not the dashboard's sync CLI — knows or cares which
-concrete backend is actually running underneath. Three backends exist
+concrete backend is actually running underneath. Four backends exist
 today, selected with `--storage-backend` (or the equivalent
 `ALGAESENSE_STORAGE_BACKEND` environment variable) on both
 `algaesense-edge start` and `algaesense-dashboard-sync`:
@@ -40,8 +40,13 @@ today, selected with `--storage-backend` (or the equivalent
   machine's disk mounted over the network, and it behaves identically
   to a cloud backend from every caller's point of view.
 - **`firebase`** — uploads to a Firebase Storage bucket (a Google Cloud
-  Storage bucket managed through a Firebase project). This is what this
-  project uses today.
+  Storage bucket managed through a Firebase project).
+- **`sftp`** — pushes files directly onto another machine over SSH (e.g.
+  the Pi pushing straight onto an operator's laptop). No cloud account,
+  no shared network filesystem (SMB/NFS) to set up — just an SSH server
+  already running on the destination and a key pair. This is the
+  simplest option if you'd rather keep data entirely between your own
+  machines than involve a cloud provider.
 
 ### Adding your own backend
 
@@ -146,6 +151,71 @@ Add `--experiment-id exp_...` to sync just one experiment instead of
 every experiment currently in the bucket. Run this any time (the
 experiment doesn't need to have finished) to refresh the dashboard's
 "Past experiment" view with whatever's been uploaded so far.
+
+## Pushing directly to your own laptop over SSH (no cloud account, no shared drive)
+
+This is the `sftp` backend: the Pi pushes each completed hour's file
+straight onto your laptop the moment it's ready, over SSH, and deletes
+its own local copy right after. Unlike `local`, it doesn't need a
+network file share (SMB/NFS) mounted on the Pi — just an SSH server
+already running on the laptop.
+
+### 1. Enable an SSH server on the laptop (one-time, Windows)
+
+Windows 10/11 ships an OpenSSH Server as an optional feature:
+
+```powershell
+# Run as Administrator
+Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+Start-Service sshd
+Set-Service -Name sshd -StartupType Automatic
+```
+
+Confirm it's listening: `Test-NetConnection localhost -Port 22` should
+report `TcpTestSucceeded : True`.
+
+### 2. Generate a key pair on the Pi and authorize it on the laptop
+
+```bash
+# On the Pi
+ssh-keygen -t ed25519 -f ~/.ssh/algaesense_sftp_key -N ""
+cat ~/.ssh/algaesense_sftp_key.pub   # copy this line
+```
+
+On the laptop, append that public key line to the SSH server's
+authorized-keys file for the account the Pi will log in as. For a
+**non-Administrator** Windows account, that's
+`C:\Users\<you>\.ssh\authorized_keys` (create the `.ssh` folder if it
+doesn't exist, one public-key line per line in the file). For an
+Administrator account, Windows' OpenSSH Server instead reads
+`C:\ProgramData\ssh\administrators_authorized_keys` — check which
+applies to your account before troubleshooting a login failure.
+
+Test it from the Pi before wiring anything else up:
+`ssh -i ~/.ssh/algaesense_sftp_key <your-windows-username>@<laptop-tailscale-address>` — should log straight in with no password prompt.
+
+### 3. Configure the Pi
+
+```
+algaesense-edge start ... \
+  --storage-backend sftp \
+  --storage-sftp-host <laptop-tailscale-address> \
+  --storage-sftp-username <your-windows-username> \
+  --storage-sftp-private-key /home/pi/.ssh/algaesense_sftp_key \
+  --storage-sftp-remote-root "C:/Users/<you>/algaesense-data/raw"
+```
+
+Install the extra on the Pi first: `pip install "jaxsr-calibration[sftp]"`.
+
+**Important**: point `--storage-sftp-remote-root` at the `raw`
+subdirectory of whatever `--data-dir` you'll later run
+`algaesense-dashboard-sync` against on the laptop (e.g. if you'll run
+`algaesense-dashboard-sync --data-dir C:/Users/<you>/algaesense-data`,
+the remote root above should end in `.../algaesense-data/raw`). Files
+then arrive already in the exact layout the dashboard's sync CLI
+expects — **no `--storage-backend` flag is needed on the laptop side at
+all**; just run `algaesense-dashboard-sync` normally once files have
+started arriving, since they're already sitting locally by the time it runs.
 
 ## Using your own local device instead (no cloud account needed)
 

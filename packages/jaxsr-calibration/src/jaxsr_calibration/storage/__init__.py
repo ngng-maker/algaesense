@@ -14,3 +14,11 @@ from jaxsr_calibration.storage.factory import get_storage_backend
 from jaxsr_calibration.storage.local_backend import LocalDiskBackend
 
 __all__ = ["RemoteStorageBackend", "LocalDiskBackend", "get_storage_backend"]
+
+"""
+`FirebaseStorageBackend`/`SftpStorageBackend` are deliberately NOT
+imported here -- they each lazily import their own real dependency
+(firebase-admin / paramiko) only when actually constructed, so this
+package's core import stays free of both. Import them directly from
+`jaxsr_calibration.storage.firebase_backend`/`sftp_backend` if needed.
+"""

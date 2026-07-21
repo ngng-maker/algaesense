@@ -27,6 +27,13 @@ def get_storage_backend(config: dict) -> RemoteStorageBackend | None:
     - `"firebase"` -- `FirebaseStorageBackend(credentials_path=...,
       bucket_name=...)`. Imported lazily so `firebase-admin` is only
       ever required on a machine that actually configures this backend.
+    - `"sftp"` -- `SftpStorageBackend(host=..., username=...,
+      private_key_path=..., remote_root_dir=..., port=...)`. Pushes
+      files directly onto another machine (e.g. the Pi pushing straight
+      onto an operator's laptop) over SSH -- no cloud account, no
+      shared network filesystem to set up, just an SSH server already
+      running on the destination and a key pair. Imported lazily so
+      `paramiko` is only required on a machine that configures this one.
 
     Adding a new backend later means adding one more `elif` branch here
     plus a new module next to `local_backend.py`/`firebase_backend.py` --
@@ -49,7 +56,18 @@ def get_storage_backend(config: dict) -> RemoteStorageBackend | None:
             bucket_name=config["firebase_bucket_name"],
         )
 
+    if backend == "sftp":
+        from jaxsr_calibration.storage.sftp_backend import SftpStorageBackend
+
+        return SftpStorageBackend(
+            host=config["sftp_host"],
+            username=config["sftp_username"],
+            private_key_path=Path(config["sftp_private_key_path"]),
+            remote_root_dir=config["sftp_remote_root_dir"],
+            port=config.get("sftp_port") or 22,
+        )
+
     raise ValueError(
-        f"Unknown storage backend {backend!r}. Expected 'none', 'local', or 'firebase' "
+        f"Unknown storage backend {backend!r}. Expected 'none', 'local', 'firebase', or 'sftp' "
         "(see docs/remote_storage_setup.md for how to add a new one)."
     )

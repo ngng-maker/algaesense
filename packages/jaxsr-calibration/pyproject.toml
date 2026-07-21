@@ -39,6 +39,10 @@ dashboard = ["streamlit"]
 # storage backend (see jaxsr_calibration/storage/firebase_backend.py) --
 # the local-disk and "no remote storage" backends need nothing extra.
 cloud = ["firebase-admin"]
+# Only needed on a machine actually configured to use the SFTP remote-
+# storage backend (see jaxsr_calibration/storage/sftp_backend.py) -- pushes
+# files directly onto another machine over SSH, no cloud account needed.
+sftp = ["paramiko"]
 # Everything needed to run this package's own test suite (not needed by end users).
 dev = ["pytest", "hypothesis"]
 

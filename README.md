@@ -111,7 +111,7 @@ The Streamlit dashboard has two views, switchable from its sidebar:
 - **Live** — polls the reactor's `algaesense-edge` instance directly and plots readings as they arrive (VOC in seconds since the experiment started, camera biomass in hours since it started), with an experiment info header (reactor, sensor, camera, start time) above the charts.
 - **Past experiment** — browses previously-recorded experiments from a small local SQLite archive (`algaesense_agent.dashboard.history_db`), not the live edge instance. Since a reactor's raw Parquet files start out on its Raspberry Pi, this archive needs to be populated from a copy of that data — either pulled from cloud/remote storage, or copied manually.
 
-  By default, raw data stays only on the Pi (and gets copied by hand below). If the Pi/laptop are instead configured to offload data to a remote storage backend as it's collected (Firebase by default, or your own storage — see [`docs/remote_storage_setup.md`](docs/remote_storage_setup.md)), sync straight from there instead of `scp`:
+  By default, raw data stays only on the Pi (and gets copied by hand below). The Pi can instead be configured to offload data automatically as it's collected — to a cloud backend (Firebase), or directly onto your laptop over SSH with no cloud account at all (the `sftp` backend — see [`docs/remote_storage_setup.md`](docs/remote_storage_setup.md) for the full setup, including a Windows OpenSSH Server walkthrough). If the Pi is pushing straight onto your laptop via `sftp`, files already arrive in the right place — just run `algaesense-dashboard-sync --data-dir ./data --db-path ./data/dashboard_history.db` with no extra flags. For a cloud backend, sync straight from there instead of `scp`:
 
   ```bash
   algaesense-dashboard-sync --data-dir ./data --db-path ./data/dashboard_history.db \
@@ -120,7 +120,7 @@ The Streamlit dashboard has two views, switchable from its sidebar:
     --storage-firebase-bucket your-project-id.appspot.com
   ```
 
-  Without a remote storage backend configured, copy an experiment's files off the Pi manually first:
+  Without any remote storage backend configured, copy an experiment's files off the Pi manually first:
 
   ```bash
   # Copy an experiment's raw data off the Pi (adjust the Pi address/path)

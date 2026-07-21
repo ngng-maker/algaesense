@@ -60,7 +60,7 @@ def cli() -> None:
 @click.option("--port", type=int, default=8000, help="Network API port.")
 @click.option(
     "--storage-backend",
-    type=click.Choice(["none", "local", "firebase"]),
+    type=click.Choice(["none", "local", "firebase", "sftp"]),
     default="none",
     envvar="ALGAESENSE_STORAGE_BACKEND",
     help="Where completed hours' Parquet files go once written. 'none' (default) keeps "
@@ -86,6 +86,40 @@ def cli() -> None:
     default=None,
     help="Required if --storage-backend=firebase: the Firebase Storage bucket name.",
 )
+@click.option(
+    "--storage-sftp-host",
+    envvar="ALGAESENSE_STORAGE_SFTP_HOST",
+    default=None,
+    help="Required if --storage-backend=sftp: hostname/IP of the machine to push files onto "
+    "(e.g. your laptop's Tailscale address), which must already be running an SSH server.",
+)
+@click.option(
+    "--storage-sftp-port",
+    type=int,
+    envvar="ALGAESENSE_STORAGE_SFTP_PORT",
+    default=22,
+    help="Required if --storage-backend=sftp: SSH port on the destination machine.",
+)
+@click.option(
+    "--storage-sftp-username",
+    envvar="ALGAESENSE_STORAGE_SFTP_USERNAME",
+    default=None,
+    help="Required if --storage-backend=sftp: username to authenticate as on the destination machine.",
+)
+@click.option(
+    "--storage-sftp-private-key",
+    envvar="ALGAESENSE_STORAGE_SFTP_PRIVATE_KEY",
+    default=None,
+    help="Required if --storage-backend=sftp: path to this Pi's private key, "
+    "authorized on the destination machine's SSH server.",
+)
+@click.option(
+    "--storage-sftp-remote-root",
+    envvar="ALGAESENSE_STORAGE_SFTP_REMOTE_ROOT",
+    default=None,
+    help="Required if --storage-backend=sftp: directory on the destination machine to write "
+    "raw files into (created automatically if it doesn't exist).",
+)
 def start(
     experiment: str,
     reactor: str,
@@ -109,6 +143,11 @@ def start(
     storage_local_root: str | None,
     storage_firebase_credentials: str | None,
     storage_firebase_bucket: str | None,
+    storage_sftp_host: str | None,
+    storage_sftp_port: int,
+    storage_sftp_username: str | None,
+    storage_sftp_private_key: str | None,
+    storage_sftp_remote_root: str | None,
 ) -> None:
     """Start sensor acquisition and the network API together, against real hardware."""
 
@@ -118,9 +157,10 @@ def start(
     somewhere to build up a table before it's complete). What
     `--storage-backend` controls is only what happens to a file the
     moment its hour completes: 'none' leaves it here for good (the
-    original behavior); 'local'/'firebase' upload it elsewhere and
-    delete this copy right away, so raw-data-dir never accumulates more
-    than the current, still-being-written hour for each sensor/camera.
+    original behavior); 'local'/'firebase'/'sftp' upload it elsewhere
+    and delete this copy right away, so raw-data-dir never accumulates
+    more than the current, still-being-written hour for each
+    sensor/camera.
     """
     remote_storage_backend = get_storage_backend(
         {
@@ -128,6 +168,11 @@ def start(
             "local_root_dir": storage_local_root,
             "firebase_credentials_path": storage_firebase_credentials,
             "firebase_bucket_name": storage_firebase_bucket,
+            "sftp_host": storage_sftp_host,
+            "sftp_port": storage_sftp_port,
+            "sftp_username": storage_sftp_username,
+            "sftp_private_key_path": storage_sftp_private_key,
+            "sftp_remote_root_dir": storage_sftp_remote_root,
         }
     )
 
