@@ -35,6 +35,10 @@ dependencies = [
 [project.optional-dependencies]
 hardware = ["smbus2", "pyserial"]
 dashboard = ["streamlit"]
+# Only needed on a machine actually configured to use the Firebase remote-
+# storage backend (see jaxsr_calibration/storage/firebase_backend.py) --
+# the local-disk and "no remote storage" backends need nothing extra.
+cloud = ["firebase-admin"]
 # Everything needed to run this package's own test suite (not needed by end users).
 dev = ["pytest", "hypothesis"]
 

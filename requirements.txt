@@ -40,6 +40,12 @@ pydantic>=2
 pyyaml
 click
 
+# ---- Optional: only on machines using the Firebase remote-storage backend ----
+# (jaxsr-calibration's "cloud" extra -- see docs/remote_storage_setup.md.
+# Not needed for the default "none" backend, or for the "local" backend,
+# which needs no new dependency at all.)
+firebase-admin
+
 # ---- algaesense-edge, non-hardware part (any machine running the edge API) ----
 fastapi
 uvicorn

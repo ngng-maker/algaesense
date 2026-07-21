@@ -10,13 +10,17 @@ from pathlib import Path
 import pytest
 from algaesense_edge.acquisition.writer import PartitionedParquetWriter
 from jaxsr_calibration.logging_.schema import CAMERA_RAW_SCHEMA, VOC_RAW_SCHEMA
+from jaxsr_calibration.storage import LocalDiskBackend
 
 from algaesense_agent.dashboard.history_db import (
     ingest_all_experiments,
     ingest_experiment,
     list_experiments,
+    list_remote_experiment_ids,
     load_experiment_camera_readings,
     load_experiment_voc_readings,
+    sync_and_ingest_all_experiments,
+    sync_and_ingest_experiment,
 )
 
 _START = dt.datetime(2026, 7, 25, 8, 0, 0, tzinfo=dt.timezone.utc)
@@ -147,6 +151,86 @@ def test_ingest_all_experiments_finds_every_experiment_under_data_dir(tmp_path: 
     db_path = tmp_path / "history.db"
 
     results = ingest_all_experiments(db_path, tmp_path)
+
+    assert {r["experiment_id"] for r in results} == {"exp_a", "exp_b"}
+    assert {e["experiment_id"] for e in list_experiments(db_path)} == {"exp_a", "exp_b"}
+
+
+def _write_voc_rows_to_remote(remote_root: Path, experiment_id: str, reactor_id: str, sensor_id: str, n: int, start: dt.datetime) -> None:
+    """Simulates what a Pi configured with a remote storage backend
+    actually does: writes go straight to a `LocalDiskBackend`-backed
+    writer, so nothing ever lands in a local `data/raw/` directory at
+    all -- only in the "remote" root."""
+    writer = PartitionedParquetWriter(
+        base_dir=remote_root.parent / "pi_working_buffer",
+        experiment_id=experiment_id,
+        partition_key="sensor_id",
+        partition_value=sensor_id,
+        schema=VOC_RAW_SCHEMA,
+        remote_backend=LocalDiskBackend(root_dir=remote_root),
+    )
+    for i in range(n):
+        writer.write_row(
+            {
+                "timestamp": start + dt.timedelta(seconds=i),
+                "experiment_id": experiment_id,
+                "sensor_id": sensor_id,
+                "reactor_id": reactor_id,
+                "pid_voltage_mv": 300.0 + i,
+                "sample_t_c": None,
+                "sample_rh_pct": None,
+                "sample_flow_sccm": None,
+                "pump_pwm": None,
+                "lamp_hours": 10.0,
+                "reactor_par_umol_m2_s": 100.0,
+                "reactor_temp_c": None,
+                "reactor_od": None,
+                "reactor_ph": None,
+                "light_state": "on",
+                "room_t_c": None,
+                "room_rh_pct": None,
+                "acquisition_status": "OK",
+            }
+        )
+    writer.close()
+
+
+def test_list_remote_experiment_ids_reads_from_the_backend(tmp_path: Path) -> None:
+    remote_root = tmp_path / "remote"
+    _write_voc_rows_to_remote(remote_root, "exp_remote_a", "R01", "PID01", n=1, start=_START)
+    _write_voc_rows_to_remote(remote_root, "exp_remote_b", "R01", "PID01", n=1, start=_START)
+    backend = LocalDiskBackend(root_dir=remote_root)
+
+    assert list_remote_experiment_ids(backend) == ["exp_remote_a", "exp_remote_b"]
+
+
+def test_sync_and_ingest_experiment_downloads_then_ingests(tmp_path: Path) -> None:
+    """The remote-storage equivalent of the old `scp` + `ingest_experiment`
+    two-step workflow: nothing exists in `local_data_dir` beforehand,
+    everything comes from the backend."""
+    remote_root = tmp_path / "remote"
+    _write_voc_rows_to_remote(remote_root, "exp_01", "R01", "PID01", n=4, start=_START)
+    backend = LocalDiskBackend(root_dir=remote_root)
+
+    local_data_dir = tmp_path / "laptop_data"
+    db_path = tmp_path / "history.db"
+    result = sync_and_ingest_experiment(db_path, local_data_dir, backend, "exp_01")
+
+    assert result == {"experiment_id": "exp_01", "voc_rows": 4, "camera_rows": 0}
+    assert (local_data_dir / "raw" / "experiments" / "exp_01" / "sensor_id=PID01").exists()
+    voc = load_experiment_voc_readings(db_path, "exp_01")
+    assert len(voc) == 4
+
+
+def test_sync_and_ingest_all_experiments_pulls_every_remote_experiment(tmp_path: Path) -> None:
+    remote_root = tmp_path / "remote"
+    _write_voc_rows_to_remote(remote_root, "exp_a", "R01", "PID01", n=1, start=_START)
+    _write_voc_rows_to_remote(remote_root, "exp_b", "R01", "PID01", n=1, start=_START)
+    backend = LocalDiskBackend(root_dir=remote_root)
+
+    local_data_dir = tmp_path / "laptop_data"
+    db_path = tmp_path / "history.db"
+    results = sync_and_ingest_all_experiments(db_path, local_data_dir, backend)
 
     assert {r["experiment_id"] for r in results} == {"exp_a", "exp_b"}
     assert {e["experiment_id"] for e in list_experiments(db_path)} == {"exp_a", "exp_b"}

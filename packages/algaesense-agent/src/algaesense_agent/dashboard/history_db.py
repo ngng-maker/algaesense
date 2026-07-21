@@ -2,6 +2,12 @@
 Streamlit dashboard can let an operator browse a finished experiment the
 same way it shows the live one -- without needing the raw Parquet files
 (and the algaesense-edge instance that wrote them) present at query time.
+
+Raw files can be ingested either from a local copy of `data/` (e.g. after
+a manual `scp` from the Pi) or synced directly from a configured
+`jaxsr_calibration.storage.RemoteStorageBackend` (Firebase, a local/NAS
+mount, or any future backend) -- see `sync_and_ingest_experiment`/
+`sync_and_ingest_all_experiments` and `main()`'s `--storage-backend` flag.
 """
 
 from __future__ import annotations
@@ -9,6 +15,8 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
+
+from jaxsr_calibration.storage import RemoteStorageBackend
 
 from algaesense_agent.raw_readers import (
     NoRawReadingsFoundError,
@@ -127,6 +135,50 @@ def ingest_all_experiments(db_path: Path, data_dir: Path) -> list[dict]:
     return [ingest_experiment(db_path, data_dir, experiment_id) for experiment_id in list_raw_experiment_ids(data_dir)]
 
 
+def list_remote_experiment_ids(backend: RemoteStorageBackend) -> list[str]:
+    """List every experiment_id present in the configured remote storage
+    backend -- the remote equivalent of `raw_readers.list_raw_experiment_ids`,
+    used when this machine is syncing from the cloud/NAS backend instead
+    of a local `scp`'d copy."""
+    keys = backend.list_keys("experiments/")
+    """
+    Every key looks like "experiments/{experiment_id}/{partition}=.../
+    hour=....parquet" (see PartitionedParquetWriter._remote_key) -- the
+    second path segment is always the experiment_id.
+    """
+    return sorted({key.split("/")[1] for key in keys if len(key.split("/")) > 1})
+
+
+def download_experiment_from_remote(backend: RemoteStorageBackend, data_dir: Path, experiment_id: str) -> int:
+    """Download every raw file the remote backend has for one experiment
+    into `data_dir`, preserving the exact relative layout
+    `raw_readers.py`'s loaders already expect (`raw/experiments/
+    {experiment_id}/...`) -- so the ordinary `ingest_experiment` call
+    right after this works unchanged, whether its files came from a local
+    `scp` copy or from here. Returns how many files were downloaded."""
+    keys = backend.list_keys(f"experiments/{experiment_id}/")
+    for key in keys:
+        backend.download_file(key, Path(data_dir) / "raw" / key)
+    return len(keys)
+
+
+def sync_and_ingest_experiment(db_path: Path, data_dir: Path, backend: RemoteStorageBackend, experiment_id: str) -> dict:
+    """The remote-storage equivalent of running `scp` then
+    `ingest_experiment` by hand -- downloads one experiment's files from
+    the configured backend, then ingests them the usual way."""
+    download_experiment_from_remote(backend, data_dir, experiment_id)
+    return ingest_experiment(db_path, data_dir, experiment_id)
+
+
+def sync_and_ingest_all_experiments(db_path: Path, data_dir: Path, backend: RemoteStorageBackend) -> list[dict]:
+    """Bulk version of `sync_and_ingest_experiment`, for the
+    `algaesense-dashboard-sync` CLI's `--storage-backend` mode."""
+    return [
+        sync_and_ingest_experiment(db_path, data_dir, backend, experiment_id)
+        for experiment_id in list_remote_experiment_ids(backend)
+    ]
+
+
 def list_experiments(db_path: Path) -> list[dict]:
     """List every experiment currently in the archive, most recently
     started first -- what the dashboard's sidebar picker reads from."""
@@ -206,16 +258,44 @@ def load_experiment_camera_readings(db_path: Path, experiment_id: str) -> list[d
 def main() -> None:
     """Entry point for the `algaesense-dashboard-sync` console script --
     ingests every experiment found under a data directory into the
-    history database."""
+    history database. With `--storage-backend`, pulls the raw files from
+    the configured remote backend first, replacing the manual `scp`
+    step (see docs/remote_storage_setup.md)."""
     import argparse
+
+    from jaxsr_calibration.storage import get_storage_backend
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", required=True, type=Path, help="Root data directory (containing raw/experiments/...)")
     parser.add_argument("--db-path", required=True, type=Path, help="SQLite file to write into")
-    parser.add_argument("--experiment-id", default=None, help="Ingest only this experiment (default: every experiment found)")
+    parser.add_argument("--experiment-id", default=None, help="Sync/ingest only this experiment (default: every experiment found)")
+    parser.add_argument(
+        "--storage-backend",
+        choices=["none", "local", "firebase"],
+        default="none",
+        help="Pull raw files from this remote backend into --data-dir before ingesting, "
+        "instead of assuming --data-dir already has them (e.g. via a manual scp copy).",
+    )
+    parser.add_argument("--storage-local-root", default=None, help="Required if --storage-backend=local")
+    parser.add_argument("--storage-firebase-credentials", default=None, help="Required if --storage-backend=firebase")
+    parser.add_argument("--storage-firebase-bucket", default=None, help="Required if --storage-backend=firebase")
     args = parser.parse_args()
 
-    if args.experiment_id:
+    backend = get_storage_backend(
+        {
+            "backend": args.storage_backend,
+            "local_root_dir": args.storage_local_root,
+            "firebase_credentials_path": args.storage_firebase_credentials,
+            "firebase_bucket_name": args.storage_firebase_bucket,
+        }
+    )
+
+    if backend is not None:
+        if args.experiment_id:
+            results = [sync_and_ingest_experiment(args.db_path, args.data_dir, backend, args.experiment_id)]
+        else:
+            results = sync_and_ingest_all_experiments(args.db_path, args.data_dir, backend)
+    elif args.experiment_id:
         results = [ingest_experiment(args.db_path, args.data_dir, args.experiment_id)]
     else:
         results = ingest_all_experiments(args.db_path, args.data_dir)

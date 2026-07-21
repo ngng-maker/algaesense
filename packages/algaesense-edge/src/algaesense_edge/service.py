@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from jaxsr_calibration.logging_.schema import CAMERA_RAW_SCHEMA, VOC_RAW_SCHEMA
+from jaxsr_calibration.storage import RemoteStorageBackend
 
 from algaesense_edge.acquisition.camera import CameraCapture, process_clip
 from algaesense_edge.acquisition.voc import TRHSensorReader, VOCSensorReader
@@ -69,6 +70,14 @@ class AcquisitionService:
 
     light_state: str = "on"
 
+    """
+    Passed straight through to both Parquet writers -- when set, each
+    hour's file is uploaded remotely and its local copy deleted
+    immediately (see PartitionedParquetWriter). `None` (the default)
+    means "keep everything local," the exact prior behavior.
+    """
+    remote_storage_backend: RemoteStorageBackend | None = None
+
     def __post_init__(self) -> None:
         self.voc_writer = PartitionedParquetWriter(
             base_dir=self.raw_data_dir,
@@ -76,6 +85,7 @@ class AcquisitionService:
             partition_key="sensor_id",
             partition_value=self.sensor_id,
             schema=VOC_RAW_SCHEMA,
+            remote_backend=self.remote_storage_backend,
         )
         self.camera_writer = PartitionedParquetWriter(
             base_dir=self.raw_data_dir,
@@ -83,6 +93,7 @@ class AcquisitionService:
             partition_key="camera_id",
             partition_value=self.camera_id,
             schema=CAMERA_RAW_SCHEMA,
+            remote_backend=self.remote_storage_backend,
         )
         self.camera_clip_dir.mkdir(parents=True, exist_ok=True)
 

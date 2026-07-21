@@ -100,6 +100,7 @@ The reason for splitting propose and apply into two separate code paths (rather 
    pip install -e "packages/algaesense-edge[hardware]"   # on the Raspberry Pi only
    pip install -e "packages/algaesense-agent"             # on the brain server
    ```
+   Add the `cloud` extra (`pip install -e "packages/jaxsr-calibration[cloud]"`) on any machine that will use the Firebase remote-storage backend — see [`docs/remote_storage_setup.md`](docs/remote_storage_setup.md); skip it if you're keeping raw data local or using the `local`-directory backend instead.
 5. **Calibrate your gas sensor** using the guided calibration wizard (ask the assistant in Slack to start a standard-addition calibration) before trusting any ppm readings.
 6. **Start an experiment** and begin watching readings — either through the assistant, or the live dashboard (`streamlit run packages/algaesense-agent/src/algaesense_agent/dashboard/streamlit_app.py`).
 
@@ -108,7 +109,18 @@ The reason for splitting propose and apply into two separate code paths (rather 
 The Streamlit dashboard has two views, switchable from its sidebar:
 
 - **Live** — polls the reactor's `algaesense-edge` instance directly and plots readings as they arrive (VOC in seconds since the experiment started, camera biomass in hours since it started), with an experiment info header (reactor, sensor, camera, start time) above the charts.
-- **Past experiment** — browses previously-recorded experiments from a small local SQLite archive (`algaesense_agent.dashboard.history_db`), not the live edge instance. Since a reactor's raw Parquet files live on its Raspberry Pi, this archive needs to be populated from a local copy of that data:
+- **Past experiment** — browses previously-recorded experiments from a small local SQLite archive (`algaesense_agent.dashboard.history_db`), not the live edge instance. Since a reactor's raw Parquet files start out on its Raspberry Pi, this archive needs to be populated from a copy of that data — either pulled from cloud/remote storage, or copied manually.
+
+  By default, raw data stays only on the Pi (and gets copied by hand below). If the Pi/laptop are instead configured to offload data to a remote storage backend as it's collected (Firebase by default, or your own storage — see [`docs/remote_storage_setup.md`](docs/remote_storage_setup.md)), sync straight from there instead of `scp`:
+
+  ```bash
+  algaesense-dashboard-sync --data-dir ./data --db-path ./data/dashboard_history.db \
+    --storage-backend firebase \
+    --storage-firebase-credentials ./algaesense-firebase-key.json \
+    --storage-firebase-bucket your-project-id.appspot.com
+  ```
+
+  Without a remote storage backend configured, copy an experiment's files off the Pi manually first:
 
   ```bash
   # Copy an experiment's raw data off the Pi (adjust the Pi address/path)
@@ -118,7 +130,9 @@ The Streamlit dashboard has two views, switchable from its sidebar:
   algaesense-dashboard-sync --data-dir ./data --db-path ./data/dashboard_history.db
   ```
 
-  Re-running `algaesense-dashboard-sync` (with or without `--experiment-id <id>` to limit it to one) is always safe — it replaces that experiment's rows in the archive rather than duplicating them, so it's fine to re-sync a still-running experiment's data periodically.
+  Either way, re-running `algaesense-dashboard-sync` (with or without `--experiment-id <id>` to limit it to one) is always safe — it replaces that experiment's rows in the archive rather than duplicating them, so it's fine to re-sync a still-running experiment's data periodically.
+
+See [`docs/remote_storage_setup.md`](docs/remote_storage_setup.md) for the full picture: why this exists (a long-running experiment can genuinely fill up the Pi's SD card or a laptop's disk), how the pluggable storage backend works, setting up Firebase specifically, or pointing it at your own local device/NAS instead.
 
 ## Using it day to day
 

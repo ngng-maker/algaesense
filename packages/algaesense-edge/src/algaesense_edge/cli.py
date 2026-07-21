@@ -13,6 +13,7 @@ from pathlib import Path
 import click
 import uvicorn
 from jaxsr_calibration.calibration.config import ReactorConfig
+from jaxsr_calibration.storage import get_storage_backend
 
 from algaesense_edge.acquisition.camera import create_hardware_camera_capture
 from algaesense_edge.acquisition.i2c import scan_i2c
@@ -57,6 +58,34 @@ def cli() -> None:
 @click.option("--camera-fps", type=float, default=10.0, help="Camera recording frame rate.")
 @click.option("--host", default="0.0.0.0", help="Network API bind address.")
 @click.option("--port", type=int, default=8000, help="Network API port.")
+@click.option(
+    "--storage-backend",
+    type=click.Choice(["none", "local", "firebase"]),
+    default="none",
+    envvar="ALGAESENSE_STORAGE_BACKEND",
+    help="Where completed hours' Parquet files go once written. 'none' (default) keeps "
+    "everything on this machine's disk, same as before this option existed. See "
+    "docs/remote_storage_setup.md.",
+)
+@click.option(
+    "--storage-local-root",
+    envvar="ALGAESENSE_STORAGE_LOCAL_ROOT",
+    default=None,
+    help="Required if --storage-backend=local: a directory (external drive, NAS mount, "
+    "any other machine's disk) to mirror raw files into instead of keeping them here.",
+)
+@click.option(
+    "--storage-firebase-credentials",
+    envvar="ALGAESENSE_STORAGE_FIREBASE_CREDENTIALS",
+    default=None,
+    help="Required if --storage-backend=firebase: path to a Firebase service-account JSON key file.",
+)
+@click.option(
+    "--storage-firebase-bucket",
+    envvar="ALGAESENSE_STORAGE_FIREBASE_BUCKET",
+    default=None,
+    help="Required if --storage-backend=firebase: the Firebase Storage bucket name.",
+)
 def start(
     experiment: str,
     reactor: str,
@@ -76,8 +105,31 @@ def start(
     camera_fps: float,
     host: str,
     port: int,
+    storage_backend: str,
+    storage_local_root: str | None,
+    storage_firebase_credentials: str | None,
+    storage_firebase_bucket: str | None,
 ) -> None:
     """Start sensor acquisition and the network API together, against real hardware."""
+
+    """
+    `--raw-data-dir` always stays this machine's *working* buffer -- a
+    partial hour's rows always get written here first (writers need
+    somewhere to build up a table before it's complete). What
+    `--storage-backend` controls is only what happens to a file the
+    moment its hour completes: 'none' leaves it here for good (the
+    original behavior); 'local'/'firebase' upload it elsewhere and
+    delete this copy right away, so raw-data-dir never accumulates more
+    than the current, still-being-written hour for each sensor/camera.
+    """
+    remote_storage_backend = get_storage_backend(
+        {
+            "backend": storage_backend,
+            "local_root_dir": storage_local_root,
+            "firebase_credentials_path": storage_firebase_credentials,
+            "firebase_bucket_name": storage_firebase_bucket,
+        }
+    )
 
     voc_reader = create_hardware_voc_reader(i2c_address=voc_i2c_address)
 
@@ -123,6 +175,7 @@ def start(
         state=state,
         camera_capture_duration_s=camera_duration_s,
         camera_frame_rate_fps=camera_fps,
+        remote_storage_backend=remote_storage_backend,
     )
 
     stop_event = threading.Event()

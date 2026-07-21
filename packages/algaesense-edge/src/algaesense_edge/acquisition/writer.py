@@ -11,6 +11,7 @@ from pathlib import Path
 import polars as pl
 import pyarrow as pa
 import pyarrow.parquet as pq
+from jaxsr_calibration.storage import RemoteStorageBackend
 
 
 """
@@ -44,9 +45,22 @@ class PartitionedParquetWriter:
 
     schema: pa.Schema
 
+    """
+    When set, every hour's file is uploaded to remote storage immediately
+    after it's written, and the local copy is deleted right away --
+    the "don't fill up the Pi's tiny SD card / the laptop's own disk"
+    policy this project's storage backends exist for. `None` (the
+    default) preserves the exact prior behavior: local Parquet files
+    only, nothing uploaded, nothing deleted.
+    """
+    remote_backend: RemoteStorageBackend | None = field(default=None)
+
     _buffer: list[dict] = field(default_factory=list)
 
     _current_hour: str | None = field(default=None, init=False)
+
+    def _remote_key(self, hour: str) -> str:
+        return f"experiments/{self.experiment_id}/{self.partition_key}={self.partition_value}/hour={hour}.parquet"
 
     def write_row(self, row: dict) -> None:
         """Add one row (a plain dict matching `self.schema`'s field names)
@@ -78,6 +92,22 @@ class PartitionedParquetWriter:
         )
         partition_dir.mkdir(parents=True, exist_ok=True)
         out_path = partition_dir / f"hour={self._current_hour}.parquet"
+
+        if self.remote_backend is not None and not out_path.exists():
+            """
+            The local file can be missing for two different reasons: this
+            is genuinely a brand-new hour, or a *previous* flush already
+            uploaded this same hour's file and deleted the local copy
+            (this writer's own delete-after-upload policy, below) --
+            e.g. this process restarted mid-hour after an earlier flush.
+            Try to hydrate it back from remote first, so the append-merge
+            logic right after this handles both cases identically instead
+            of needing a separate remote-side merge path.
+            """
+            try:
+                self.remote_backend.download_file(self._remote_key(self._current_hour), out_path)
+            except FileNotFoundError:
+                pass
 
         table = pa.Table.from_pylist(self._buffer, schema=self.schema)
         if out_path.exists():
@@ -129,6 +159,15 @@ class PartitionedParquetWriter:
         tmp_path = out_path.with_suffix(".parquet.tmp")
         pq.write_table(table, tmp_path)
         tmp_path.replace(out_path)
+
+        if self.remote_backend is not None:
+            """
+            Upload before delete, always in that order -- if the upload
+            raises, the local file is simply left in place (nothing
+            lost) rather than deleted with no remote copy to show for it.
+            """
+            self.remote_backend.upload_file(out_path, self._remote_key(self._current_hour))
+            out_path.unlink()
 
         self._buffer = []
 

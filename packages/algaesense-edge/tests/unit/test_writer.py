@@ -20,6 +20,7 @@ import polars as pl
 import pyarrow.parquet as pq
 import pytest
 from jaxsr_calibration.logging_.schema import VOC_RAW_SCHEMA
+from jaxsr_calibration.storage import LocalDiskBackend
 
 from algaesense_edge.acquisition.writer import PartitionedParquetWriter
 
@@ -158,3 +159,74 @@ def test_flush_never_leaves_a_partial_hour_file_after_a_crash(
     )
     assert not hour_path.exists()
     assert list(hour_path.parent.glob("*.tmp")) == []
+
+
+def test_flush_with_remote_backend_uploads_then_deletes_local_copy(tmp_path: Path) -> None:
+    """`LocalDiskBackend` stands in for a real remote here -- it's a
+    genuine, complete implementation of `RemoteStorageBackend` (just
+    another local directory), not a stand-in that fakes behavior; it
+    exercises the writer's actual upload-then-delete code path for real."""
+    remote_root = tmp_path / "remote"
+    writer = PartitionedParquetWriter(
+        base_dir=tmp_path / "local",
+        experiment_id="exp_test",
+        partition_key="sensor_id",
+        partition_value="PID01",
+        schema=VOC_RAW_SCHEMA,
+        remote_backend=LocalDiskBackend(root_dir=remote_root),
+    )
+    writer.write_row(_voc_row(dt.datetime(2026, 7, 15, 9, 0, 0, tzinfo=dt.timezone.utc)))
+    writer.close()
+
+    local_path = tmp_path / "local" / "experiments" / "exp_test" / "sensor_id=PID01" / "hour=2026-07-15T09.parquet"
+    remote_path = remote_root / "experiments" / "exp_test" / "sensor_id=PID01" / "hour=2026-07-15T09.parquet"
+    assert not local_path.exists()
+    assert remote_path.exists()
+    assert pl.read_parquet(remote_path).height == 1
+
+
+def test_restarting_mid_hour_with_remote_backend_merges_via_download(tmp_path: Path) -> None:
+    """Same scenario as test_restarting_mid_hour_appends_rather_than_overwrites,
+    but with delete-after-upload enabled: the first writer's local copy is
+    gone by the time it closes, so the second writer's flush has to
+    hydrate the existing hour's data back from remote before appending,
+    rather than finding it already sitting on local disk."""
+    remote_root = tmp_path / "remote"
+
+    def _writer_with_backend() -> PartitionedParquetWriter:
+        return PartitionedParquetWriter(
+            base_dir=tmp_path / "local",
+            experiment_id="exp_test",
+            partition_key="sensor_id",
+            partition_value="PID01",
+            schema=VOC_RAW_SCHEMA,
+            remote_backend=LocalDiskBackend(root_dir=remote_root),
+        )
+
+    first_writer = _writer_with_backend()
+    first_writer.write_row(_voc_row(dt.datetime(2026, 7, 15, 9, 0, 0, tzinfo=dt.timezone.utc), pid_voltage_mv=1.0))
+    first_writer.close()
+
+    local_path = tmp_path / "local" / "experiments" / "exp_test" / "sensor_id=PID01" / "hour=2026-07-15T09.parquet"
+    assert not local_path.exists()  # deleted immediately after the first upload
+
+    second_writer = _writer_with_backend()
+    second_writer.write_row(_voc_row(dt.datetime(2026, 7, 15, 9, 30, 0, tzinfo=dt.timezone.utc), pid_voltage_mv=2.0))
+    second_writer.close()
+
+    remote_path = remote_root / "experiments" / "exp_test" / "sensor_id=PID01" / "hour=2026-07-15T09.parquet"
+    table = pl.read_parquet(remote_path)
+    assert table.height == 2
+    assert sorted(table["pid_voltage_mv"].to_list()) == [1.0, 2.0]
+    assert not local_path.exists()
+
+
+def test_flush_without_remote_backend_leaves_local_file_untouched(tmp_path: Path) -> None:
+    """Default behavior (remote_backend=None) must stay exactly as it was
+    before this feature existed -- nothing uploaded, nothing deleted."""
+    writer = _writer(tmp_path)
+    writer.write_row(_voc_row(dt.datetime(2026, 7, 15, 9, 0, 0, tzinfo=dt.timezone.utc)))
+    writer.close()
+
+    hour_path = tmp_path / "experiments" / "exp_test" / "sensor_id=PID01" / "hour=2026-07-15T09.parquet"
+    assert hour_path.exists()
