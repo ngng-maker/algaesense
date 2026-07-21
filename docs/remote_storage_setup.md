@@ -156,6 +156,21 @@ experiment doesn't need to have finished) to refresh the dashboard's
 
 If you already SSH into the Pi (most setups do, per `docs/hardware_setup.md`), this is the least setup of any option here: the laptop pulls files from the Pi over that same, already-working connection, and deletes each file from the Pi right after it's copied. No SSH server needs to be enabled anywhere new — the Pi's own `sshd` (already running) is all this uses, and Windows already ships an SSH *client* (just not a server) out of the box.
 
+### Finding your Pi's address
+
+You need this for `--pi-host`/`ALGAESENSE_PI_HOST`, whether or not you're using the same address you already SSH in with day to day.
+
+- **If the Pi and your laptop are on the same Tailscale network** (this project's own setup, per `docs/hardware_setup.md`): run `tailscale status` on either machine — it lists every device on the tailnet with its `100.x.x.x` address and hostname. Don't assume an address you *think* is the Pi's without checking this directly — see `docs/hardware_setup.md` §2 for a real troubleshooting story about exactly this mistake.
+- **If they're on the same plain local network (no Tailscale)**: try `ping raspberrypi.local` (or whatever hostname you set during Raspberry Pi OS setup) from your laptop — mDNS resolves this to the Pi's current local IP on most networks. If that doesn't resolve, run `hostname -I` directly on the Pi (via a keyboard/monitor, or your router's admin page listing connected devices) to get its local IP (e.g. `192.168.1.x`).
+- Either way, confirm it's actually reachable before configuring anything else: `ping <address>` should get real replies (not instant sub-1ms ones — that's usually a sign you pinged the wrong device), and `ssh <username>@<address>` should log you into the Pi, not somewhere else.
+
+### Finding out how you log into the Pi (key vs. password)
+
+You need this to know whether to use `--pi-private-key`/`ALGAESENSE_PI_PRIVATE_KEY` or `--pi-password`/`ALGAESENSE_PI_PASSWORD`.
+
+- Run `ssh <username>@<pi-address>` from your laptop. If it drops you straight into the Pi's shell with **no prompt at all**, you're already using key-based auth — check `~/.ssh/config` (if you have one) for which key it used, or it's most likely the default `~/.ssh/id_rsa` or `~/.ssh/id_ed25519` in your own user profile. Use that file's path (the private key, not the `.pub` one) for `--pi-private-key`.
+- If it **prompts you for a password**, you're using password auth — use `--pi-password` with that same password. This works immediately; switching to a key later (see the note below) is only needed once you want this to run unattended/scheduled.
+
 ```
 algaesense-dashboard-sync --data-dir ./data --db-path ./data/dashboard_history.db \
   --pull-from-pi \
