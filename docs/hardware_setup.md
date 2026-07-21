@@ -96,13 +96,11 @@ sudo apt install -y python3-picamera2 libcap-dev
 
 then recreate the venv with `--system-site-packages` (delete and redo the `python3 -m venv` step from section 3 above with `--system-site-packages` added) and re-run the two `pip install -e ...` commands. With `--system-site-packages`, pip should report `picamera2` as "Requirement already satisfied" from the apt-installed one rather than trying to build it from source again — which is what you actually want anyway, since the apt package is the one with real `libcamera` bindings.
 
-**A likely camera format mismatch, not yet resolved in code.** `picamera2`'s `H264Encoder` writes a raw H.264 elementary stream. `process_clip` (this project's own code) reads recorded clips via `cv2.VideoCapture`, which may not open a raw `.h264` file directly depending on the OpenCV build's codec support — you may see `process_clip: could not open video file at ...` even though the clip recorded fine. If that happens, remux it into a real container first:
+**`ffmpeg` is a required system dependency, not an optional remux tool.** Confirmed on real hardware: `picamera2`'s `H264Encoder` always writes a raw H.264 elementary stream regardless of the output path's extension, and `run_camera_tick` (this project's own code) names every clip `.mp4` — so `process_clip`'s `cv2.VideoCapture` reliably failed to open them (`moov atom not found`; the file genuinely wasn't a valid MP4, not an OpenCV-build quirk). Fixed in code: `Picamera2CameraCapture.record_clip` now records through picamera2's `FfmpegOutput`, which shells out to the real `ffmpeg` binary to mux a genuine MP4 container directly — no manual remux step needed anymore, but `ffmpeg` itself must be installed for this to work:
 
 ```
-ffmpeg -i clip.h264 -c copy clip.mp4
+sudo apt install -y ffmpeg
 ```
-
-(`sudo apt install -y ffmpeg` if it's not already there.) This is a real, known gap — if it turns out to happen every time rather than being an edge case, tell me and I'll fix `Picamera2CameraCapture` to write directly into an `.mp4` container instead (picamera2 supports this via `FfmpegOutput`), so this manual remux step goes away entirely.
 
 **Raspberry Pi 4 specifically**: no additional compatibility concerns beyond the above — `rpi_ws281x` has long-standing, solid support for the Pi 4's GPIO/PWM architecture. (This is a real, current concern on a Raspberry Pi 5 instead, which moved GPIO handling to a separate RP1 chip that older PWM+DMA-based libraries don't uniformly support yet — not applicable to your setup.)
 
@@ -124,6 +122,11 @@ Power-on sequence that avoids surprises:
 ## 6. Confirming the pixel count
 
 `create_hardware_led(gpio_pin, num_pixels, ...)` needs the strip's actual pixel count — I don't know this number for your ALITOVE strip. Count the individually-addressable LEDs on it (usually printed on the reel or in the product listing, e.g. "60 LED/m × length"), and use that value everywhere `--led-num-pixels` appears (the CLI) or `_TEST_NUM_PIXELS` (the hardware-marked tests, which you should update to match before running `pytest -m hardware` for real).
+
+**`pytest -m hardware` needs `sudo` too, same as `algaesense-edge start`/`scan-i2c`** — it's easy to forget since `pytest` itself feels like "just running tests." Without root, the LED tests don't just fail cleanly; a first attempt raises a clean `RuntimeError: NeoPixel support requires running with sudo`, but a *second* LED test running afterward in the same process can hit a hard `Segmentation fault` instead — the underlying `rpi_ws281x` C library's module-level state is left partially initialized by the first failed attempt, and the next one crashes the whole Python process rather than raising cleanly. Confirmed real on this hardware. Run it as:
+```
+sudo .venv/bin/pytest -m hardware packages/algaesense-edge/tests
+```
 
 ## 7. Deriving `--par-per-full-duty` without a real PAR meter
 

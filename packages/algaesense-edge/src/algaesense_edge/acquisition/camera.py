@@ -133,15 +133,15 @@ class Picamera2CameraCapture:
     picamera2 is the current standard library for the Pi camera (it
     replaced the older, now-deprecated `picamera`).
 
-    Honesty note, same as voc.py's hardware readers: this uses picamera2's
-    standard, documented recording pattern (`Picamera2` + `H264Encoder` +
-    `start_recording`/`stop_recording`), but can't be run or verified
-    without real Pi camera hardware. One thing to double-check once real
-    hardware is available: picamera2 writes a raw H.264 elementary
-    stream, which `process_clip` (via cv2.VideoCapture) may or may not
-    open directly depending on the OpenCV build's codec support -- if not,
-    remux it into an .mp4 container (e.g. with `ffmpeg -i clip.h264 -c
-    copy clip.mp4`) before calling `process_clip`.
+    Confirmed on real hardware 2026-07-21: `H264Encoder` always writes a
+    raw H.264 elementary stream regardless of the output path's extension
+    -- `run_camera_tick` (service.py) names clips `.mp4`, so `process_clip`
+    (via `cv2.VideoCapture`) reliably failed to open them (`moov atom not
+    found` -- the file genuinely isn't a valid MP4 container, no matter
+    the OpenCV build). Fixed by muxing directly into a real MP4 via
+    picamera2's `FfmpegOutput`, which shells out to the real `ffmpeg`
+    binary (a required system dependency now, not just an occasional
+    manual-remux tool -- see docs/hardware_setup.md).
     """
 
     resolution_wh: tuple[int, int] = (640, 480)
@@ -150,6 +150,7 @@ class Picamera2CameraCapture:
         try:
             from picamera2 import Picamera2
             from picamera2.encoders import H264Encoder
+            from picamera2.outputs import FfmpegOutput
         except ImportError as exc:
             raise ImportError(
                 "Picamera2CameraCapture requires the 'hardware' extra "
@@ -177,8 +178,17 @@ class Picamera2CameraCapture:
         camera.configure(video_config)
         encoder = H264Encoder()
 
+        """
+        `FfmpegOutput` (rather than a plain path string) pipes the
+        encoder's raw H.264 output through the real `ffmpeg` binary,
+        which muxes it into whatever container format `out_path`'s
+        extension actually calls for -- so a `.mp4` path now genuinely
+        contains a playable MP4, not a raw stream wearing an `.mp4` name.
+        """
+        output = FfmpegOutput(str(out_path))
+
         try:
-            camera.start_recording(encoder, str(out_path))
+            camera.start_recording(encoder, output)
             time.sleep(duration_s)
         finally:
             camera.stop_recording()
