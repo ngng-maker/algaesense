@@ -50,10 +50,13 @@ def test_phase1b_streams_both_sensor_types_and_gates_led_commands(tmp_path) -> N
     )
 
     """
-    1.0s / 5fps -- confirmed on real hardware that a shorter capture
-    (0.5s) doesn't give FfmpegOutput enough real frame data to mux a
+    2.0s / 5fps -- confirmed on real hardware that shorter captures (0.5s,
+    then 1.0s) don't give FfmpegOutput enough real frame data to mux a
     valid MP4 container reliably (ffmpeg itself errors: "Invalid data
-    found when processing input"). 1.0s is the shortest duration
+    found when processing input") -- there's real startup overhead eating
+    into the requested duration before frames actually start landing (a
+    2s/5fps request only yielded 2 real frames in a direct hardware
+    check, not the naively-expected 10). 2.0s is the shortest duration
     confirmed to mux cleanly; kept short rather than realistic to keep
     this test fast, not to match a real capture's actual length.
     """
@@ -68,7 +71,7 @@ def test_phase1b_streams_both_sensor_types_and_gates_led_commands(tmp_path) -> N
         camera_clip_dir=tmp_path / "clips",
         raw_data_dir=tmp_path / "raw",
         state=state,
-        camera_capture_duration_s=1.0,
+        camera_capture_duration_s=2.0,
         camera_frame_rate_fps=5.0,
     )
 
