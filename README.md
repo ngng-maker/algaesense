@@ -103,6 +103,23 @@ The reason for splitting propose and apply into two separate code paths (rather 
 5. **Calibrate your gas sensor** using the guided calibration wizard (ask the assistant in Slack to start a standard-addition calibration) before trusting any ppm readings.
 6. **Start an experiment** and begin watching readings — either through the assistant, or the live dashboard (`streamlit run packages/algaesense-agent/src/algaesense_agent/dashboard/streamlit_app.py`).
 
+## The live dashboard, and browsing past experiments
+
+The Streamlit dashboard has two views, switchable from its sidebar:
+
+- **Live** — polls the reactor's `algaesense-edge` instance directly and plots readings as they arrive (VOC in seconds since the experiment started, camera biomass in hours since it started), with an experiment info header (reactor, sensor, camera, start time) above the charts.
+- **Past experiment** — browses previously-recorded experiments from a small local SQLite archive (`algaesense_agent.dashboard.history_db`), not the live edge instance. Since a reactor's raw Parquet files live on its Raspberry Pi, this archive needs to be populated from a local copy of that data:
+
+  ```bash
+  # Copy an experiment's raw data off the Pi (adjust the Pi address/path)
+  scp -r pi@<pi-address>:~/algaesense/algaesense/data/raw/experiments/<experiment_id> ./data/raw/experiments/
+
+  # Then (re-)index it into the dashboard's history database
+  algaesense-dashboard-sync --data-dir ./data --db-path ./data/dashboard_history.db
+  ```
+
+  Re-running `algaesense-dashboard-sync` (with or without `--experiment-id <id>` to limit it to one) is always safe — it replaces that experiment's rows in the archive rather than duplicating them, so it's fine to re-sync a still-running experiment's data periodically.
+
 ## Using it day to day
 
 Once everything is running, most interaction happens in Slack. A few examples of what you can ask for:
