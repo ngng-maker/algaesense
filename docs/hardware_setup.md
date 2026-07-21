@@ -32,6 +32,18 @@ First connection will ask you to confirm the host key — type `yes`.
 
 **Important:** I (Claude Code) don't have a way to reach your Pi directly from this session — I have no network path to it, and I'm not going to ask you to expose it to the internet or hand me credentials to store. The practical workflow is: I prepare code changes here, you `git pull` (or `scp`/copy) them onto the Pi and run the actual hardware-facing commands yourself over your own SSH session, and tell me what happened (errors, output) so I can help debug from there. If you'd rather, you can paste terminal output back to me directly.
 
+### Connecting over Tailscale specifically: verify the IP first, don't assume it
+
+If you're connecting from a Tailscale-joined "brain" machine rather than the same local network, **confirm the Pi's actual Tailscale IP before troubleshooting anything else** — don't assume an address is correct just because it's the one you remember or the one you happened to try first. On a real bring-up, an incorrect address here can produce a confusing, multi-layered troubleshooting session that looks like an SSH problem, a firewall problem, or a service-not-running problem, when it's actually none of those.
+
+Confirm the real address with either:
+```
+tailscale status
+```
+(run on either machine — lists every device on your tailnet with its actual assigned IP), or the Tailscale admin console (`login.tailscale.com/admin/machines`), which shows the same list in a browser.
+
+**A concrete tell that you have the wrong address**: if a plain `ping` to the address you're using succeeds instantly (sub-1ms round trip) and reports `TTL=128`, you're very likely pinging a Windows machine, not the Pi — Raspberry Pi OS (Linux) replies to pings with a default TTL of **64**, not 128. If everything else (SSH, the network API, any other service) then gets "connection refused" against that same address while the Pi itself looks completely healthy when you check it directly, that combination is a strong sign the address itself is wrong, not that anything on the Pi is broken. Re-verify with `tailscale status` before going any further down other troubleshooting paths.
+
 ## 3. Getting the code onto the Pi
 
 Simplest path, once the Pi has internet access and git installed:
