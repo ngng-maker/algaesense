@@ -187,11 +187,27 @@ class Picamera2CameraCapture:
         """
         output = FfmpegOutput(str(out_path))
 
+        """
+        `camera.close()` is required, not optional -- confirmed on real
+        hardware that skipping it breaks every capture after the first
+        one in the same process (test or real service run alike):
+        `Picamera2.__init__` registers every instance with a global
+        camera-manager singleton, which keeps a live reference and holds
+        the device in `Configured` state until explicitly closed. Without
+        this, a NEW `Picamera2()` on the next call fails with
+        `RuntimeError: Failed to acquire camera: Device or resource busy`
+        -- Python's own garbage collection never reaches it, since the
+        manager singleton, not just this local variable, is holding the
+        reference. This is exactly the failure mode a real long-running
+        `algaesense-edge start` process would hit on its second hourly
+        camera capture, not just a test-isolation artifact.
+        """
         try:
             camera.start_recording(encoder, output)
             time.sleep(duration_s)
         finally:
             camera.stop_recording()
+            camera.close()
 
         return out_path
 
