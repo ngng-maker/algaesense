@@ -46,7 +46,7 @@ def _service(tmp_path, state: AppState) -> AcquisitionService:
 
 def _led_actuator(max_par: float = 500.0) -> LEDActuator:
     return LEDActuator(
-        hardware=NeoPixelLEDHardware(gpio_pin=18, num_pixels=30),
+        hardware=NeoPixelLEDHardware(gpio_pin=18, num_pixels=40),
         reactor_config=ReactorConfig(id="R01", model="pioreactor_20mL", max_par_umol_m2_s=max_par),
         par_per_full_duty_umol_m2_s=1000.0,
     )

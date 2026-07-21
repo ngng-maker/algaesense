@@ -28,7 +28,7 @@ Placeholder pixel count for constructing NeoPixelLEDHardware in tests
 that never actually reach hardware -- adjust to the real strip's length
 before running the @pytest.mark.hardware tests below for real on the Pi.
 """
-_TEST_NUM_PIXELS = 30
+_TEST_NUM_PIXELS = 40
 
 
 def _reactor(max_par: float = 500.0) -> ReactorConfig:

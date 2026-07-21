@@ -25,7 +25,7 @@ from algaesense_edge.actuators.actuators import LEDActuator, NeoPixelLEDHardware
 from algaesense_edge.api.app import create_app
 from algaesense_edge.api.state import AppState
 
-_TEST_NUM_PIXELS = 30
+_TEST_NUM_PIXELS = 40
 
 
 def _state_with_led(max_par: float = 500.0, par_per_full_duty: float = 1000.0) -> AppState:
