@@ -152,7 +152,28 @@ every experiment currently in the bucket. Run this any time (the
 experiment doesn't need to have finished) to refresh the dashboard's
 "Past experiment" view with whatever's been uploaded so far.
 
+## Pulling from the Pi (simplest option — no new SSH server needed anywhere)
+
+If you already SSH into the Pi (most setups do, per `docs/hardware_setup.md`), this is the least setup of any option here: the laptop pulls files from the Pi over that same, already-working connection, and deletes each file from the Pi right after it's copied. No SSH server needs to be enabled anywhere new — the Pi's own `sshd` (already running) is all this uses, and Windows already ships an SSH *client* (just not a server) out of the box.
+
+```
+algaesense-dashboard-sync --data-dir ./data --db-path ./data/dashboard_history.db \
+  --pull-from-pi \
+  --pi-host <pi-tailscale-address> \
+  --pi-username pi \
+  --pi-private-key ~/.ssh/id_ed25519 \
+  --pi-remote-raw-dir /home/pi/algaesense/algaesense/data/raw
+```
+
+`--pi-private-key` is whatever key you already use to `ssh` into the Pi — if you log in with a password today rather than a key, generate one first (`ssh-keygen`, then append the public half to the Pi's `~/.ssh/authorized_keys`, the normal way to add key-based SSH auth) so this can run unattended.
+
+Install the extra first: `pip install "algaesense-agent[sftp]"` (same `paramiko` dependency as the `sftp` push backend below, just used in the opposite direction here).
+
+**To run this automatically** (not something you trigger by hand each time), schedule it — e.g. Windows Task Scheduler: **Create Basic Task** → trigger **Daily**, then edit the trigger to **Repeat task every** 15–60 minutes → action **Start a program**, pointing at your Python environment's `algaesense-dashboard-sync` with the arguments above. Once created, new experiment data moves from the Pi to your laptop (and clears off the Pi) on its own, with nothing left to remember to run.
+
 ## Pushing directly to your own laptop over SSH (no cloud account, no shared drive)
+
+The option above (laptop pulls from Pi) needs the least setup for most people, since it reuses SSH access you already have. The alternative below has the Pi push instead — only worth it if you'd rather the Pi initiate the transfer the instant each hour completes, rather than on the pull schedule above.
 
 This is the `sftp` backend: the Pi pushes each completed hour's file
 straight onto your laptop the moment it's ready, over SSH, and deletes

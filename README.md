@@ -111,7 +111,15 @@ The Streamlit dashboard has two views, switchable from its sidebar:
 - **Live** — polls the reactor's `algaesense-edge` instance directly and plots readings as they arrive (VOC in seconds since the experiment started, camera biomass in hours since it started), with an experiment info header (reactor, sensor, camera, start time) above the charts.
 - **Past experiment** — browses previously-recorded experiments from a small local SQLite archive (`algaesense_agent.dashboard.history_db`), not the live edge instance. Since a reactor's raw Parquet files start out on its Raspberry Pi, this archive needs to be populated from a copy of that data — either pulled from cloud/remote storage, or copied manually.
 
-  By default, raw data stays only on the Pi (and gets copied by hand below). The Pi can instead be configured to offload data automatically as it's collected — to a cloud backend (Firebase), or directly onto your laptop over SSH with no cloud account at all (the `sftp` backend — see [`docs/remote_storage_setup.md`](docs/remote_storage_setup.md) for the full setup, including a Windows OpenSSH Server walkthrough). If the Pi is pushing straight onto your laptop via `sftp`, files already arrive in the right place — just run `algaesense-dashboard-sync --data-dir ./data --db-path ./data/dashboard_history.db` with no extra flags. For a cloud backend, sync straight from there instead of `scp`:
+  By default, raw data stays only on the Pi (and gets copied by hand below). The simplest way to automate that — no new SSH server, no cloud account — is `algaesense-dashboard-sync --pull-from-pi`: it pulls new files from the Pi over the SSH access you already use to log into it, and deletes them from the Pi once copied. Schedule it (e.g. Windows Task Scheduler, repeating every 15–60 min) and it needs nothing further:
+
+  ```bash
+  algaesense-dashboard-sync --data-dir ./data --db-path ./data/dashboard_history.db \
+    --pull-from-pi --pi-host <pi-address> --pi-username pi \
+    --pi-private-key ~/.ssh/id_ed25519 --pi-remote-raw-dir /home/pi/algaesense/algaesense/data/raw
+  ```
+
+  The Pi can also be configured to push data out itself instead — to a cloud backend (Firebase), or straight onto your laptop over SSH (the `sftp` backend, which needs an SSH server running on the laptop, unlike `--pull-from-pi` above). See [`docs/remote_storage_setup.md`](docs/remote_storage_setup.md) for all the options. For a cloud backend, sync straight from there instead of `scp`:
 
   ```bash
   algaesense-dashboard-sync --data-dir ./data --db-path ./data/dashboard_history.db \

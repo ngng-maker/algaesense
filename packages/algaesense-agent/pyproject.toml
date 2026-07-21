@@ -32,6 +32,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Only needed if using algaesense-dashboard-sync's --pull-from-pi mode
+# (packages/algaesense-agent/src/algaesense_agent/dashboard/pi_sync.py) --
+# not needed for the default local-copy/scp workflow, or for pulling
+# from a jaxsr_calibration.storage remote backend instead.
+sftp = ["paramiko"]
 # Everything needed to run this package's own test suite (not needed by end users).
 # algaesense-edge is a *test-only* dependency here: the Phase 2 end-to-end
 # test runs its real FastAPI app in-process (via httpx.ASGITransport) as a

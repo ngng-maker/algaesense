@@ -286,7 +286,37 @@ def main() -> None:
     parser.add_argument("--storage-sftp-username", default=None, help="Required if --storage-backend=sftp")
     parser.add_argument("--storage-sftp-private-key", default=None, help="Required if --storage-backend=sftp")
     parser.add_argument("--storage-sftp-remote-root", default=None, help="Required if --storage-backend=sftp")
+    parser.add_argument(
+        "--pull-from-pi",
+        action="store_true",
+        help="Before ingesting, pull every raw file from the Pi over SSH (reusing whatever "
+        "SSH server/key you already use to log into it) and delete it from the Pi once "
+        "copied -- an alternative to --storage-backend that needs no new SSH server anywhere, "
+        "since the laptop connects to the Pi's already-running one. See docs/remote_storage_setup.md.",
+    )
+    parser.add_argument("--pi-host", default=None, help="Required if --pull-from-pi")
+    parser.add_argument("--pi-port", type=int, default=22, help="Only used if --pull-from-pi")
+    parser.add_argument("--pi-username", default=None, help="Required if --pull-from-pi")
+    parser.add_argument("--pi-private-key", default=None, help="Required if --pull-from-pi")
+    parser.add_argument(
+        "--pi-remote-raw-dir",
+        default=None,
+        help="Required if --pull-from-pi: path to data/raw on the Pi, e.g. /home/pi/algaesense/algaesense/data/raw",
+    )
     args = parser.parse_args()
+
+    if args.pull_from_pi:
+        from algaesense_agent.dashboard.pi_sync import pull_and_delete_from_pi
+
+        pulled = pull_and_delete_from_pi(
+            host=args.pi_host,
+            port=args.pi_port,
+            username=args.pi_username,
+            private_key_path=args.pi_private_key,
+            remote_raw_dir=args.pi_remote_raw_dir,
+            local_data_dir=args.data_dir,
+        )
+        print(f"Pulled {pulled} file(s) from the Pi.")
 
     backend = get_storage_backend(
         {
