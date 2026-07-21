@@ -112,6 +112,32 @@ async def stop_led_profile_change(reactor_id: str) -> dict:
 
 
 @mcp.tool()
+async def get_recent_voc_readings(limit: int = 20) -> list[dict]:
+    """Fetch the most recent VOC sensor readings the edge service has
+    buffered -- a live snapshot as of right now, not a continuous stream
+    (there is no MCP mechanism to push updates into a chat message over
+    time). Read-only, safe to call freely without confirmation."""
+    edge = _build_edge_client()
+    try:
+        return await edge.recent_voc_readings(limit=limit)
+    finally:
+        await edge.close()
+
+
+@mcp.tool()
+async def get_recent_camera_readings(limit: int = 5) -> list[dict]:
+    """Fetch the most recent camera readings the edge service has
+    buffered -- a live snapshot as of right now, same caveat as
+    get_recent_voc_readings about this not being a continuous stream.
+    Read-only, safe to call freely without confirmation."""
+    edge = _build_edge_client()
+    try:
+        return await edge.recent_camera_readings(limit=limit)
+    finally:
+        await edge.close()
+
+
+@mcp.tool()
 def propose_temperature_change(reactor_id: str, temperature_c: float) -> dict:
     """Not implemented -- no temperature-control hardware exists yet."""
 
