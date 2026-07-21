@@ -262,9 +262,17 @@ def main() -> None:
     the configured remote backend first, replacing the manual `scp`
     step (see docs/remote_storage_setup.md)."""
     import argparse
+    import os
 
     from jaxsr_calibration.storage import get_storage_backend
 
+    """
+    Every `--pi-*`/`--storage-*` flag below also reads an `ALGAESENSE_*`
+    environment variable as its default, same convention as
+    algaesense-edge's cli.py -- so a password (or any of these) never
+    has to sit in a scheduled task's visible argument list or shell
+    history; set it once in the environment and omit the flag entirely.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", required=True, type=Path, help="Root data directory (containing raw/experiments/...)")
     parser.add_argument("--db-path", required=True, type=Path, help="SQLite file to write into")
@@ -289,29 +297,46 @@ def main() -> None:
     parser.add_argument(
         "--pull-from-pi",
         action="store_true",
+        default=os.environ.get("ALGAESENSE_PULL_FROM_PI", "").lower() in ("1", "true", "yes"),
         help="Before ingesting, pull every raw file from the Pi over SSH (reusing whatever "
         "SSH server/key you already use to log into it) and delete it from the Pi once "
         "copied -- an alternative to --storage-backend that needs no new SSH server anywhere, "
-        "since the laptop connects to the Pi's already-running one. See docs/remote_storage_setup.md.",
+        "since the laptop connects to the Pi's already-running one. Also settable as "
+        "ALGAESENSE_PULL_FROM_PI=1. See docs/remote_storage_setup.md.",
     )
-    parser.add_argument("--pi-host", default=None, help="Required if --pull-from-pi")
-    parser.add_argument("--pi-port", type=int, default=22, help="Only used if --pull-from-pi")
-    parser.add_argument("--pi-username", default=None, help="Required if --pull-from-pi")
+    parser.add_argument(
+        "--pi-host", default=os.environ.get("ALGAESENSE_PI_HOST"), help="Required if --pull-from-pi (or ALGAESENSE_PI_HOST)"
+    )
+    parser.add_argument(
+        "--pi-port",
+        type=int,
+        default=int(os.environ.get("ALGAESENSE_PI_PORT", "22")),
+        help="Only used if --pull-from-pi (or ALGAESENSE_PI_PORT)",
+    )
+    parser.add_argument(
+        "--pi-username",
+        default=os.environ.get("ALGAESENSE_PI_USERNAME"),
+        help="Required if --pull-from-pi (or ALGAESENSE_PI_USERNAME)",
+    )
     parser.add_argument(
         "--pi-private-key",
-        default=None,
-        help="Required if --pull-from-pi and not using --pi-password: path to the private key you SSH into the Pi with.",
+        default=os.environ.get("ALGAESENSE_PI_PRIVATE_KEY"),
+        help="Path to the private key you SSH into the Pi with, if not using --pi-password "
+        "(or ALGAESENSE_PI_PRIVATE_KEY).",
     )
     parser.add_argument(
         "--pi-password",
-        default=None,
-        help="Required if --pull-from-pi and not using --pi-private-key: the password you SSH into the Pi with "
-        "(fine to try immediately; a key is recommended once you want this to run unattended/scheduled).",
+        default=os.environ.get("ALGAESENSE_PI_PASSWORD"),
+        help="The password you SSH into the Pi with, if not using --pi-private-key (or "
+        "ALGAESENSE_PI_PASSWORD -- keeping it out of shell history/scheduled-task argument "
+        "lists is exactly why the env var form exists; a key is recommended once you want "
+        "this to run unattended/scheduled).",
     )
     parser.add_argument(
         "--pi-remote-raw-dir",
-        default=None,
-        help="Required if --pull-from-pi: path to data/raw on the Pi, e.g. /home/pi/algaesense/algaesense/data/raw",
+        default=os.environ.get("ALGAESENSE_PI_REMOTE_RAW_DIR"),
+        help="Path to data/raw on the Pi, e.g. /home/pi/algaesense/algaesense/data/raw "
+        "(required if --pull-from-pi, or ALGAESENSE_PI_REMOTE_RAW_DIR).",
     )
     args = parser.parse_args()
 

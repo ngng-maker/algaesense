@@ -169,7 +169,39 @@ algaesense-dashboard-sync --data-dir ./data --db-path ./data/dashboard_history.d
 
 Install the extra first: `pip install "algaesense-agent[sftp]"` (same `paramiko` dependency as the `sftp` push backend below, just used in the opposite direction here).
 
-**To run this automatically** (not something you trigger by hand each time), schedule it — e.g. Windows Task Scheduler: **Create Basic Task** → trigger **Daily**, then edit the trigger to **Repeat task every** 15–60 minutes → action **Start a program**, pointing at your Python environment's `algaesense-dashboard-sync` with the arguments above. Once created, new experiment data moves from the Pi to your laptop (and clears off the Pi) on its own, with nothing left to remember to run.
+### Setting these as environment variables instead
+
+Every `--pull-from-pi`/`--pi-*` flag above also has an `ALGAESENSE_*` environment variable equivalent, so the password (or any of these) never has to sit in a scheduled task's visible argument list or your shell history:
+
+| Flag | Environment variable |
+| --- | --- |
+| `--pull-from-pi` | `ALGAESENSE_PULL_FROM_PI=1` |
+| `--pi-host` | `ALGAESENSE_PI_HOST` |
+| `--pi-port` | `ALGAESENSE_PI_PORT` |
+| `--pi-username` | `ALGAESENSE_PI_USERNAME` |
+| `--pi-private-key` | `ALGAESENSE_PI_PRIVATE_KEY` |
+| `--pi-password` | `ALGAESENSE_PI_PASSWORD` |
+| `--pi-remote-raw-dir` | `ALGAESENSE_PI_REMOTE_RAW_DIR` |
+
+On Windows, set these once (persists across reboots) via PowerShell — as an Administrator if you want them available system-wide, or without for just your own account:
+
+```powershell
+[System.Environment]::SetEnvironmentVariable("ALGAESENSE_PI_HOST", "<pi-address>", "User")
+[System.Environment]::SetEnvironmentVariable("ALGAESENSE_PI_USERNAME", "<your-pi-username>", "User")
+[System.Environment]::SetEnvironmentVariable("ALGAESENSE_PI_PASSWORD", "<your-pi-password>", "User")
+[System.Environment]::SetEnvironmentVariable("ALGAESENSE_PI_REMOTE_RAW_DIR", "/home/pi/algaesense/algaesense/data/raw", "User")
+[System.Environment]::SetEnvironmentVariable("ALGAESENSE_PULL_FROM_PI", "1", "User")
+```
+
+Open a **new** terminal window afterward (existing ones won't see the change), then just run:
+
+```
+algaesense-dashboard-sync --data-dir ./data --db-path ./data/dashboard_history.db
+```
+
+with no `--pi-*`/`--pull-from-pi` flags needed at all.
+
+**To run this automatically** (not something you trigger by hand each time), schedule it — e.g. Windows Task Scheduler: **Create Basic Task** → trigger **Daily**, then edit the trigger to **Repeat task every** 15–60 minutes → action **Start a program**, pointing at your Python environment's `algaesense-dashboard-sync` with just `--data-dir`/`--db-path` (everything else comes from the environment variables above, which a scheduled task run as your own user account inherits). Once created, new experiment data moves from the Pi to your laptop (and clears off the Pi) on its own, with nothing left to remember to run.
 
 ## Pushing directly to your own laptop over SSH (no cloud account, no shared drive)
 
