@@ -1,0 +1,47 @@
+# Built-in PID response-factor table (spec §24), relative to isobutylene = 1.00
+# on a 10.6 eV lamp. Values are widely published approximations (Alphasense
+# AAN 305, RAE Systems TN-106) -- real lamps drift with age, so treat these as
+# a reasonable default, not a certified measurement. mw is molecular weight in
+# g/mol; ie_ev is ionization energy in eV (informational only, not used in any
+# calculation).
+compounds:
+  isobutylene:
+    mw: 56.11
+    response_factor: 1.00
+    ie_ev: 9.24
+    source: "Alphasense AAN 305 (reference compound)"
+  isoprene:
+    mw: 68.12
+    response_factor: 0.63
+    ie_ev: 8.85
+    source: "Alphasense AAN 305"
+  acetone:
+    mw: 58.08
+    response_factor: 1.10
+    ie_ev: 9.69
+    source: "Alphasense AAN 305"
+  methanol:
+    mw: 32.04
+    response_factor: 10.0
+    ie_ev: 10.85
+    source: "Alphasense AAN 305"
+  ethanol:
+    mw: 46.07
+    response_factor: 10.0
+    ie_ev: 10.48
+    source: "Alphasense AAN 305"
+  dms:
+    mw: 62.13
+    response_factor: 0.44
+    ie_ev: 8.69
+    source: "RAE Systems TN-106"
+  toluene:
+    mw: 92.14
+    response_factor: 0.53
+    ie_ev: 8.82
+    source: "Alphasense AAN 305"
+  benzene:
+    mw: 78.11
+    response_factor: 0.53
+    ie_ev: 9.24
+    source: "RAE Systems TN-106"

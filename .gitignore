@@ -18,7 +18,13 @@ build/
 
 # Locally-generated data (raw sensor Parquet, calibration outputs) --
 # reproducible from a real experiment run, not something to version control.
-data/
+# Anchored to repo root (leading /) -- an unanchored `data/` here also
+# matched packages/jaxsr-calibration/src/jaxsr_calibration/calibration/data/,
+# a real shipped package resource (response_factors.yaml), silently
+# excluding it from every commit since this repo's first commit. Confirmed
+# the hard way: a fresh clone on the Pi/brain-laptop failed 12 tests with
+# FileNotFoundError because that file was never actually in git history.
+/data/
 
 # Local secrets: Pi SSH connection details, API keys, tokens -- never
 # committed. See .env.example for the expected keys with no real values.
