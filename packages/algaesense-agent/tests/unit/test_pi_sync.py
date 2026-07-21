@@ -95,24 +95,42 @@ class _FileHandle(paramiko.SFTPHandle):
 
 
 class _ServerInterface(paramiko.ServerInterface):
-    def __init__(self, authorized_key) -> None:
+    """Accepts either the test's known public key or the test's known
+    password -- mirrors real sshd, which can have both auth methods
+    enabled, so this exercises `pull_and_delete_from_pi`'s password path
+    for real too, not just key-based auth."""
+
+    def __init__(self, authorized_key=None, valid_password=None) -> None:
         self._authorized_key = authorized_key
+        self._valid_password = valid_password
 
     def check_channel_request(self, kind, chanid):
         return paramiko.OPEN_SUCCEEDED if kind == "session" else paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
 
     def check_auth_publickey(self, username, key):
-        return paramiko.AUTH_SUCCESSFUL if key.get_base64() == self._authorized_key.get_base64() else paramiko.AUTH_FAILED
+        if self._authorized_key is not None and key.get_base64() == self._authorized_key.get_base64():
+            return paramiko.AUTH_SUCCESSFUL
+        return paramiko.AUTH_FAILED
+
+    def check_auth_password(self, username, password):
+        if self._valid_password is not None and password == self._valid_password:
+            return paramiko.AUTH_SUCCESSFUL
+        return paramiko.AUTH_FAILED
 
     def get_allowed_auths(self, username):
-        return "publickey"
+        methods = []
+        if self._authorized_key is not None:
+            methods.append("publickey")
+        if self._valid_password is not None:
+            methods.append("password")
+        return ",".join(methods)
 
 
-def _run_one_connection(sock, host_key, client_public_key, root_dir: str) -> None:
+def _run_one_connection(sock, host_key, client_public_key, valid_password, root_dir: str) -> None:
     transport = paramiko.Transport(sock)
     transport.add_server_key(host_key)
     transport.set_subsystem_handler("sftp", paramiko.SFTPServer, sftp_si=_RealLocalSftpServer, root_dir=root_dir)
-    transport.start_server(server=_ServerInterface(client_public_key))
+    transport.start_server(server=_ServerInterface(authorized_key=client_public_key, valid_password=valid_password))
     channel = transport.accept(20)
     if channel is not None:
         while transport.is_active():
@@ -133,6 +151,7 @@ def sftp_server(tmp_path: Path):
     client_key = paramiko.RSAKey.generate(2048)
     client_key_path = tmp_path / "client_key"
     client_key.write_private_key_file(str(client_key_path))
+    valid_password = "test-password-123"
 
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.bind(("127.0.0.1", 0))
@@ -146,13 +165,22 @@ def sftp_server(tmp_path: Path):
             except OSError:
                 return
             threading.Thread(
-                target=_run_one_connection, args=(conn, host_key, client_key, str(root_dir)), daemon=True
+                target=_run_one_connection,
+                args=(conn, host_key, client_key, valid_password, str(root_dir)),
+                daemon=True,
             ).start()
 
     thread = threading.Thread(target=_accept_loop, daemon=True)
     thread.start()
 
-    yield {"host": "127.0.0.1", "port": port, "username": "tester", "private_key_path": client_key_path, "root_dir": root_dir}
+    yield {
+        "host": "127.0.0.1",
+        "port": port,
+        "username": "tester",
+        "private_key_path": client_key_path,
+        "password": valid_password,
+        "root_dir": root_dir,
+    }
 
     listener.close()
 
@@ -181,6 +209,39 @@ def test_pull_and_delete_from_pi_copies_files_and_removes_them_remotely(sftp_ser
 
     # Deleted from the Pi's side once copied.
     assert not (exp_dir / "hour=2026-08-01T09.parquet").exists()
+
+
+def test_pull_and_delete_from_pi_works_with_a_password_instead_of_a_key(sftp_server, tmp_path: Path) -> None:
+    pi_raw_dir = sftp_server["root_dir"] / "data" / "raw"
+    pi_raw_dir.mkdir(parents=True)
+    exp_dir = pi_raw_dir / "experiments" / "exp_01" / "sensor_id=PID01"
+    exp_dir.mkdir(parents=True)
+    (exp_dir / "hour=2026-08-01T09.parquet").write_bytes(b"password-auth bytes")
+
+    local_data_dir = tmp_path / "laptop_data"
+    pulled = pull_and_delete_from_pi(
+        host=sftp_server["host"],
+        port=sftp_server["port"],
+        username=sftp_server["username"],
+        password=sftp_server["password"],
+        remote_raw_dir="/data/raw",
+        local_data_dir=local_data_dir,
+    )
+
+    assert pulled == 1
+    local_file = local_data_dir / "raw" / "experiments" / "exp_01" / "sensor_id=PID01" / "hour=2026-08-01T09.parquet"
+    assert local_file.read_bytes() == b"password-auth bytes"
+    assert not (exp_dir / "hour=2026-08-01T09.parquet").exists()
+
+
+def test_pull_and_delete_from_pi_requires_a_key_or_a_password(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="private_key_path or password"):
+        pull_and_delete_from_pi(
+            host="127.0.0.1",
+            username="tester",
+            remote_raw_dir="/data/raw",
+            local_data_dir=tmp_path,
+        )
 
 
 def test_pull_and_delete_from_pi_with_nothing_to_pull_is_a_safe_no_op(sftp_server, tmp_path: Path) -> None:

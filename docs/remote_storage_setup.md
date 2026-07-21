@@ -165,7 +165,7 @@ algaesense-dashboard-sync --data-dir ./data --db-path ./data/dashboard_history.d
   --pi-remote-raw-dir /home/pi/algaesense/algaesense/data/raw
 ```
 
-`--pi-private-key` is whatever key you already use to `ssh` into the Pi — if you log in with a password today rather than a key, generate one first (`ssh-keygen`, then append the public half to the Pi's `~/.ssh/authorized_keys`, the normal way to add key-based SSH auth) so this can run unattended.
+`--pi-private-key` is whatever key you already use to `ssh` into the Pi. If you currently log in with a **password** instead, use `--pi-password <your-password>` in place of `--pi-private-key` — this works immediately with no extra setup. Switch to a key later (`ssh-keygen` on the Pi, then append the public half to the Pi's own `~/.ssh/authorized_keys`) once you want this to run unattended/scheduled, since a scheduled task has nothing to type a password into.
 
 Install the extra first: `pip install "algaesense-agent[sftp]"` (same `paramiko` dependency as the `sftp` push backend below, just used in the opposite direction here).
 

@@ -21,16 +21,25 @@ from pathlib import Path
 def pull_and_delete_from_pi(
     host: str,
     username: str,
-    private_key_path: Path,
     remote_raw_dir: str,
     local_data_dir: Path,
+    private_key_path: Path | None = None,
+    password: str | None = None,
     port: int = 22,
 ) -> int:
     """Copies every file under `remote_raw_dir` (the Pi's `data/raw`)
     into `local_data_dir/raw`, preserving the exact relative layout
     `raw_readers.py` already expects, and deletes each file from the Pi
     immediately after it's confirmed copied. Returns how many files were
-    pulled."""
+    pulled.
+
+    Pass exactly one of `private_key_path` (recommended -- works
+    unattended, e.g. from a scheduled task, with nothing typed in) or
+    `password` (works right away with whatever you already log into the
+    Pi with, no key setup needed first)."""
+    if not private_key_path and not password:
+        raise ValueError("pull_and_delete_from_pi needs either private_key_path or password")
+
     try:
         import paramiko
     except ImportError as exc:
@@ -41,7 +50,10 @@ def pull_and_delete_from_pi(
 
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    client.connect(hostname=host, port=port, username=username, key_filename=str(private_key_path))
+    if private_key_path:
+        client.connect(hostname=host, port=port, username=username, key_filename=str(private_key_path))
+    else:
+        client.connect(hostname=host, port=port, username=username, password=password)
 
     try:
         sftp = client.open_sftp()

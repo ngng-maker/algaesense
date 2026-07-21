@@ -297,7 +297,17 @@ def main() -> None:
     parser.add_argument("--pi-host", default=None, help="Required if --pull-from-pi")
     parser.add_argument("--pi-port", type=int, default=22, help="Only used if --pull-from-pi")
     parser.add_argument("--pi-username", default=None, help="Required if --pull-from-pi")
-    parser.add_argument("--pi-private-key", default=None, help="Required if --pull-from-pi")
+    parser.add_argument(
+        "--pi-private-key",
+        default=None,
+        help="Required if --pull-from-pi and not using --pi-password: path to the private key you SSH into the Pi with.",
+    )
+    parser.add_argument(
+        "--pi-password",
+        default=None,
+        help="Required if --pull-from-pi and not using --pi-private-key: the password you SSH into the Pi with "
+        "(fine to try immediately; a key is recommended once you want this to run unattended/scheduled).",
+    )
     parser.add_argument(
         "--pi-remote-raw-dir",
         default=None,
@@ -313,6 +323,7 @@ def main() -> None:
             port=args.pi_port,
             username=args.pi_username,
             private_key_path=args.pi_private_key,
+            password=args.pi_password,
             remote_raw_dir=args.pi_remote_raw_dir,
             local_data_dir=args.data_dir,
         )
