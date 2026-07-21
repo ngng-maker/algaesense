@@ -49,6 +49,14 @@ def test_phase1b_streams_both_sensor_types_and_gates_led_commands(tmp_path) -> N
         par_per_full_duty_umol_m2_s=1000.0,
     )
 
+    """
+    1.0s / 5fps -- confirmed on real hardware that a shorter capture
+    (0.5s) doesn't give FfmpegOutput enough real frame data to mux a
+    valid MP4 container reliably (ffmpeg itself errors: "Invalid data
+    found when processing input"). 1.0s is the shortest duration
+    confirmed to mux cleanly; kept short rather than realistic to keep
+    this test fast, not to match a real capture's actual length.
+    """
     service = AcquisitionService(
         experiment_id="exp_phase1b_test",
         reactor_id="R01",
@@ -60,7 +68,7 @@ def test_phase1b_streams_both_sensor_types_and_gates_led_commands(tmp_path) -> N
         camera_clip_dir=tmp_path / "clips",
         raw_data_dir=tmp_path / "raw",
         state=state,
-        camera_capture_duration_s=0.5,  # short, to keep this test fast
+        camera_capture_duration_s=1.0,
         camera_frame_rate_fps=5.0,
     )
 
