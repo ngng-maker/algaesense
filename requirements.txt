@@ -1,0 +1,69 @@
+# AlgaeSense -- third-party dependencies, flattened across all three packages.
+#
+# This file lists the PyPI packages each part of the system needs. It does
+# NOT list jaxsr-calibration / algaesense-edge / algaesense-agent themselves --
+# those are this repo's own local packages, not published to PyPI, and are
+# installed separately with `pip install -e packages/<name>` (see README.md).
+# Trying to `pip install algaesense-edge` (etc.) as if it were a normal
+# dependency will fail with "No matching distribution found" -- that's
+# expected; it means you're missing the `-e packages/...` step, not a bug
+# in this file.
+#
+# Sections below are grouped by WHICH MACHINE needs them (see README.md's
+# "Getting started" section for the full picture):
+#   - Core:            needed everywhere jaxsr-calibration is installed
+#   - Edge (non-hardware): needed on whatever machine runs algaesense-edge
+#   - Edge (hardware):  Raspberry-Pi-ONLY -- will not build on a normal
+#                       laptop; only install this section on the Pi itself
+#   - Agent:            needed on the "brain" machine running the MCP
+#                       servers / Slack assistant
+#   - Dev/test:         only needed to run this repo's own test suites,
+#                       not needed to actually run the system
+#
+# Don't `pip install -r requirements.txt` blindly on every machine -- copy
+# the section(s) relevant to that machine's role, same as the per-package
+# `pip install -e ...[extra]` commands in README.md.
+
+# ---- Core (jaxsr-calibration; needed on every machine) ----
+jaxsr
+numpy
+scipy
+pandas
+polars
+# Pinned as a floor, not just "latest" -- installing streamlit into a shared
+# environment has previously been observed to silently downgrade pyarrow to
+# an older version that reintroduces a Hive-partitioning bug this project's
+# own raw-data layout triggers (see CLAUDE.md's 2026-07-16 dev log entry).
+pyarrow>=25.0.0
+statsmodels
+pydantic>=2
+pyyaml
+click
+
+# ---- algaesense-edge, non-hardware part (any machine running the edge API) ----
+fastapi
+uvicorn
+httpx
+opencv-python
+
+# ---- algaesense-edge, hardware extra -- RASPBERRY PI ONLY ----
+# These either need real I2C/GPIO hardware to import successfully, or (for
+# picamera2) a real camera module + a system apt package pip alone can't
+# provide -- see docs/hardware_setup.md section 4. Do not install this
+# section on a normal laptop; it will fail or install nothing useful.
+adafruit-circuitpython-ads1x15
+adafruit-circuitpython-bme280
+picamera2
+adafruit-circuitpython-neopixel
+smbus2
+
+# ---- algaesense-agent (the "brain" machine running the MCP servers / Slack assistant) ----
+mcp
+matplotlib
+streamlit
+slack_sdk
+
+# ---- Dev/test only (not needed to run the system, only to run its tests) ----
+pytest
+pytest-asyncio
+hypothesis

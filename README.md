@@ -91,16 +91,17 @@ The reason for splitting propose and apply into two separate code paths (rather 
 
 ## Getting started
 
-1. **Set up the Raspberry Pi and wiring.** Follow [`docs/hardware_setup.md`](docs/hardware_setup.md) for SSH access, sensor/LED wiring, and Pi-specific OS setup (this covers real, confirmed gotchas — GPIO permissions, an audio/LED conflict, camera driver quirks — worth reading before your first real run).
-2. **Set up Slack and the conversational agent.** Follow [`docs/slack_and_hermes_setup.md`](docs/slack_and_hermes_setup.md) to create the Slack app, install the agent, and connect it to your Anthropic API key.
-3. **Install the software.** Each part of the system installs independently:
+1. **Source the hardware.** See [`hardware/BOM.md`](hardware/BOM.md) for the full parts list and wiring summary — Raspberry Pi 4, the VOC sensor and ADC, the LED strip and its level shifter, and the camera. Physical CAD files (mounts/enclosures) live in [`hardware/cad/`](hardware/cad/).
+2. **Set up the Raspberry Pi and wiring.** Follow [`docs/hardware_setup.md`](docs/hardware_setup.md) for SSH access, sensor/LED wiring, and Pi-specific OS setup (this covers real, confirmed gotchas — GPIO permissions, an audio/LED conflict, camera driver quirks — worth reading before your first real run).
+3. **Set up Slack and the conversational agent.** Follow [`docs/slack_and_hermes_setup.md`](docs/slack_and_hermes_setup.md) to create the Slack app, install the agent, and connect it to your Anthropic API key.
+4. **Install the software.** Each part of the system installs independently — [`requirements.txt`](requirements.txt) lists every third-party dependency by which machine needs it, but the packages themselves aren't on PyPI, so each still needs its own editable install:
    ```bash
    pip install -e packages/jaxsr-calibration
    pip install -e "packages/algaesense-edge[hardware]"   # on the Raspberry Pi only
-   pip install -e "packages/algaesense-agent[dev]"        # on the brain server
+   pip install -e "packages/algaesense-agent"             # on the brain server
    ```
-4. **Calibrate your gas sensor** using the guided calibration wizard (ask the assistant in Slack to start a standard-addition calibration) before trusting any ppm readings.
-5. **Start an experiment** and begin watching readings — either through the assistant, or the live dashboard (`streamlit run packages/algaesense-agent/src/algaesense_agent/dashboard/streamlit_app.py`).
+5. **Calibrate your gas sensor** using the guided calibration wizard (ask the assistant in Slack to start a standard-addition calibration) before trusting any ppm readings.
+6. **Start an experiment** and begin watching readings — either through the assistant, or the live dashboard (`streamlit run packages/algaesense-agent/src/algaesense_agent/dashboard/streamlit_app.py`).
 
 ## Using it day to day
 
@@ -121,6 +122,7 @@ The system is split into three independently-installable pieces:
 - **`packages/jaxsr-calibration`** — the hardware-free math: calibration, diagnostics, and the model-fitting pipeline. Runs anywhere.
 - **`packages/algaesense-edge`** — the code that runs on the Raspberry Pi: reading sensors, driving the LED, and enforcing safety limits.
 - **`packages/algaesense-agent`** — the tools the Slack assistant calls: fitting models, running diagnostics, the calibration wizard, and the propose/approve/apply hardware controls.
+- **`hardware/`** — the bill of materials ([`BOM.md`](hardware/BOM.md)) and physical CAD files ([`cad/`](hardware/cad/)) for the reactor's electronics build.
 
 ## Status
 
@@ -128,6 +130,7 @@ All three packages are built and tested (see [`CLAUDE.md`](CLAUDE.md) for the fu
 
 ## Further reading
 
+- [`hardware/BOM.md`](hardware/BOM.md) — bill of materials and wiring summary
 - [`docs/hardware_setup.md`](docs/hardware_setup.md) — SSH access, wiring, and Pi-specific setup
 - [`docs/slack_and_hermes_setup.md`](docs/slack_and_hermes_setup.md) — Slack app and conversational-agent setup
 - [`CLAUDE.md`](CLAUDE.md) — full technical architecture, coding conventions, and development history, for anyone working on the code itself
