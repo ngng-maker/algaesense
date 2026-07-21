@@ -76,6 +76,14 @@ sudo apt install -y python3-picamera2
 
 If your virtualenv doesn't see it afterward, recreate the venv with `--system-site-packages` so it can see the system-installed `picamera2`, rather than trying to `pip install picamera2` into an isolated venv.
 
+**Confirmed real failure**: pip's own `picamera2` (the one `pip install -e "packages/algaesense-edge[hardware]"` tries to fetch) pulls in a transitive dependency, `python-prctl`, which needs to compile a C extension against `libcap`'s development headers — and that build fails with `error: subprocess-exited-with-error ... You need to install libcap development headers to build this module` if they aren't installed. Fix, in order:
+
+```
+sudo apt install -y python3-picamera2 libcap-dev
+```
+
+then recreate the venv with `--system-site-packages` (delete and redo the `python3 -m venv` step from section 3 above with `--system-site-packages` added) and re-run the two `pip install -e ...` commands. With `--system-site-packages`, pip should report `picamera2` as "Requirement already satisfied" from the apt-installed one rather than trying to build it from source again — which is what you actually want anyway, since the apt package is the one with real `libcamera` bindings.
+
 **A likely camera format mismatch, not yet resolved in code.** `picamera2`'s `H264Encoder` writes a raw H.264 elementary stream. `process_clip` (this project's own code) reads recorded clips via `cv2.VideoCapture`, which may not open a raw `.h264` file directly depending on the OpenCV build's codec support — you may see `process_clip: could not open video file at ...` even though the clip recorded fine. If that happens, remux it into a real container first:
 
 ```
