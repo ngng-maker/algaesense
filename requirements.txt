@@ -73,6 +73,10 @@ smbus2
 mcp
 matplotlib
 streamlit
+# Imported directly by streamlit_app.py (fixed 0-5 ppm y-axis on the VOC
+# chart) -- listed explicitly even though streamlit already pulls it in
+# transitively, since a direct import shouldn't rely silently on that.
+altair
 slack_sdk
 
 # ---- Dev/test only (not needed to run the system, only to run its tests) ----

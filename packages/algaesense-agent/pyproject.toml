@@ -28,6 +28,11 @@ dependencies = [
     # a library module, but the dependency lives here since it ships as
     # part of this package.
     "streamlit",
+    # streamlit_app.py imports this directly (for the VOC chart's fixed
+    # 0-5 ppm y-axis, which st.line_chart can't pin) -- listed explicitly
+    # even though streamlit already pulls it in transitively, since a
+    # direct import shouldn't rely silently on a dependency's dependency.
+    "altair",
     "slack_sdk",
 ]
 
