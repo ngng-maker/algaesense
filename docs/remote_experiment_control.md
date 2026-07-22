@@ -4,6 +4,8 @@
 
 Under the hood: it SSHes into the Pi (the same connection `algaesense-dashboard-sync --pull-from-pi` already uses) and runs `sudo systemctl restart algaesense-edge`. The systemd unit already generates a fresh experiment_id from the current date/time on every restart (see `docs/hardware_setup.md`), so nothing else needs to change for a "new" experiment to actually begin.
 
+**Restarting only restarts data acquisition — it does not turn the LED on.** A fresh run starts with the light off, same as any other restart, until a setpoint or profile is applied. If you want the light on from the start, tell the assistant so explicitly, e.g. *"start a new experiment run for R01 with the LED at 100 PAR"* — this passes an optional `led_profile` dict (same shape as `propose_led_profile_change`'s, e.g. `{"shape": "constant", "par_umol_m2_s": 100.0}`, or a full ramp/sinusoid/step schedule) through to `apply_start_new_experiment_run`, which waits for the fresh run's network API to come back online (polling `/health`) before starting it — attempting to set the LED immediately after triggering the restart would just fail, since the old process is still shutting down and the new one hasn't finished initializing yet.
+
 ## Configuration (on the machine running `algaesense-mcp-actuators`, i.e. wherever Hermes runs)
 
 Reuses the exact same `ALGAESENSE_PI_*` environment variables as the dashboard's `--pull-from-pi` sync (see `docs/remote_storage_setup.md`) — if you've already set those up, there's nothing new to configure for the SSH connection itself:
@@ -25,10 +27,10 @@ Running `sudo systemctl restart algaesense-edge` over a scripted SSH connection 
 sudo visudo -f /etc/sudoers.d/algaesense-restart
 ```
 
-Add this single line (replace `ytpio` with whatever user you SSH in as):
+Add this single line (replace `your-ssh-username` with whatever user you SSH in as):
 
 ```
-ytpio ALL=(root) NOPASSWD: /usr/bin/systemctl restart algaesense-edge
+your-ssh-username ALL=(root) NOPASSWD: /usr/bin/systemctl restart algaesense-edge
 ```
 
 Save and exit. This grants passwordless sudo for **only** that exact command — not a general `NOPASSWD: ALL`, which would let anything logging in as that user run arbitrary commands as root. Confirm the exact path to `systemctl` matches your system first: `which systemctl` (usually `/usr/bin/systemctl` or `/bin/systemctl` on Raspberry Pi OS).

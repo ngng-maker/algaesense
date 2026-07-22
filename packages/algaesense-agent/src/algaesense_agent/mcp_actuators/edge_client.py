@@ -90,6 +90,14 @@ class EdgeClient:
     def __init__(self, base_url: str, timeout: float = 10.0, transport: httpx.AsyncBaseTransport | None = None) -> None:
         self._client = httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=timeout, transport=transport)
 
+    async def health(self) -> dict:
+        """Check whether the edge service is up and responding at all --
+        used to wait out a restart before sending anything else, e.g. an
+        LED setpoint right after starting a new experiment run."""
+        response = await self._client.get("/health")
+        response.raise_for_status()
+        return response.json()
+
     async def recent_voc_readings(self, limit: int | None = None) -> list[dict]:
         """Fetch the most recent VOC readings the edge service has buffered."""
         response = await self._client.get(

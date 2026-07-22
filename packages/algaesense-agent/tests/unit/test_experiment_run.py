@@ -15,11 +15,14 @@ import pytest
 
 paramiko = pytest.importorskip("paramiko", reason="paramiko (the 'sftp' extra) isn't installed in this environment")
 
+from algaesense_agent.mcp_actuators.edge_client import EdgeClient
 from algaesense_agent.mcp_actuators.experiment_run import (
     apply_new_experiment_run,
     propose_new_experiment_run,
     restart_edge_service,
+    wait_for_edge_healthy,
 )
+from tests.fixtures.real_edge_app import build_real_edge_app, edge_transport
 
 
 class _ServerInterface(paramiko.ServerInterface):
@@ -155,3 +158,84 @@ async def test_apply_new_experiment_run_without_dashboard_url_omits_it(ssh_serve
     )
 
     assert "dashboard_url" not in result
+
+
+@pytest.mark.asyncio
+async def test_apply_new_experiment_run_with_led_profile_starts_it_on_the_real_edge_app(ssh_server) -> None:
+    """Combines the real local SSH server (standing in for the Pi) with
+    a real, in-process algaesense-edge FastAPI app (standing in for the
+    edge service that comes back up after the restart) -- both real
+    implementations, nothing mocked."""
+    app, _state = build_real_edge_app(reactor_id="R01")
+    edge = EdgeClient(base_url="http://fake-edge", transport=edge_transport(app))
+    profile = {"shape": "constant", "par_umol_m2_s": 100.0}
+
+    try:
+        result = await apply_new_experiment_run(
+            "R01",
+            host=ssh_server["host"],
+            port=ssh_server["port"],
+            username=ssh_server["username"],
+            password=ssh_server["password"],
+            led_profile=profile,
+            edge=edge,
+        )
+    finally:
+        await edge.close()
+
+    assert result["status"] == "restarted"
+    assert result["led_profile_result"]["profile"] == profile
+    assert "LED profile started" in result["note"]
+
+
+@pytest.mark.asyncio
+async def test_apply_new_experiment_run_with_led_profile_but_no_edge_client_raises_clearly(ssh_server) -> None:
+    with pytest.raises(ValueError, match="no edge client was provided"):
+        await apply_new_experiment_run(
+            "R01",
+            host=ssh_server["host"],
+            port=ssh_server["port"],
+            username=ssh_server["username"],
+            password=ssh_server["password"],
+            led_profile={"shape": "constant", "par_umol_m2_s": 100.0},
+        )
+
+
+@pytest.mark.asyncio
+async def test_wait_for_edge_healthy_returns_once_the_real_app_responds() -> None:
+    app, _state = build_real_edge_app(reactor_id="R01")
+    edge = EdgeClient(base_url="http://fake-edge", transport=edge_transport(app))
+
+    try:
+        await wait_for_edge_healthy(edge, timeout_s=5.0, poll_interval_s=0.1)
+    finally:
+        await edge.close()
+
+
+@pytest.mark.asyncio
+async def test_wait_for_edge_healthy_times_out_clearly_when_edge_never_responds() -> None:
+    """A real EdgeClient pointed at a host that will never answer --
+    genuinely exercises the timeout path, not a mocked failure."""
+    edge = EdgeClient(base_url="http://127.0.0.1:1", timeout=0.2)
+
+    try:
+        with pytest.raises(TimeoutError, match="did not become healthy"):
+            await wait_for_edge_healthy(edge, timeout_s=1.0, poll_interval_s=0.1)
+    finally:
+        await edge.close()
+
+
+def test_propose_new_experiment_run_with_led_profile_mentions_it() -> None:
+    profile = {"shape": "constant", "par_umol_m2_s": 100.0}
+
+    proposal = propose_new_experiment_run("R01", led_profile=profile)
+
+    assert proposal.led_profile == profile
+    assert "LED profile" in proposal.note
+
+
+def test_propose_new_experiment_run_without_led_profile_says_led_stays_off() -> None:
+    proposal = propose_new_experiment_run("R01")
+
+    assert proposal.led_profile is None
+    assert "LED will stay off" in proposal.note

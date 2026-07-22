@@ -137,3 +137,33 @@ async def test_apply_start_new_experiment_run_tool_reads_pi_env_vars_and_reports
     assert captured_kwargs["username"] == "someuser"
     assert captured_kwargs["password"] == "somepassword"
     assert captured_kwargs["dashboard_url"] == "http://example-dashboard:8501"
+    assert captured_kwargs["led_profile"] is None
+    assert captured_kwargs["edge"] is None
+
+
+async def test_apply_start_new_experiment_run_tool_builds_an_edge_client_when_led_profile_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only when led_profile is actually given should this tool bother
+    building an EdgeClient at all -- confirmed here by wiring
+    _build_edge_client at a real (if not network-exercised further)
+    in-process edge app, same pattern as _wire_real_edge_app."""
+    monkeypatch.setenv("ALGAESENSE_PI_HOST", "pi.example")
+    monkeypatch.setenv("ALGAESENSE_PI_USERNAME", "someuser")
+    monkeypatch.setenv("ALGAESENSE_PI_PASSWORD", "somepassword")
+    _wire_real_edge_app(monkeypatch)
+
+    captured_kwargs = {}
+
+    async def _fake_apply_new_experiment_run(reactor_id, **kwargs):
+        captured_kwargs["reactor_id"] = reactor_id
+        captured_kwargs.update(kwargs)
+        return {"reactor_id": reactor_id, "status": "restarted"}
+
+    monkeypatch.setattr(actuators_server, "apply_new_experiment_run", _fake_apply_new_experiment_run)
+
+    profile = {"shape": "constant", "par_umol_m2_s": 100.0}
+    await mcp.call_tool("apply_start_new_experiment_run", {"reactor_id": "R01", "led_profile": profile})
+
+    assert captured_kwargs["led_profile"] == profile
+    assert isinstance(captured_kwargs["edge"], EdgeClient)

@@ -152,28 +152,39 @@ def _pi_ssh_config() -> dict:
 
 
 @mcp.tool()
-def propose_start_new_experiment_run(reactor_id: str) -> dict:
+def propose_start_new_experiment_run(reactor_id: str, led_profile: dict | None = None) -> dict:
     """Describe starting a fresh experiment run for a reactor, without
     doing it. This restarts algaesense-edge on the Pi -- always call
     this before apply_start_new_experiment_run and show the result to
     the user for confirmation, since it stops whatever is currently
-    running."""
-    return asdict(propose_new_experiment_run(reactor_id))
+    running. Pass `led_profile` (same shape as propose_led_profile_change's,
+    e.g. `{"shape": "constant", "par_umol_m2_s": 100.0}` for a plain
+    static setpoint) if the new run should also start with a particular
+    light level/schedule rather than the LED staying off."""
+    return asdict(propose_new_experiment_run(reactor_id, led_profile=led_profile))
 
 
 @mcp.tool()
-async def apply_start_new_experiment_run(reactor_id: str) -> dict:
+async def apply_start_new_experiment_run(reactor_id: str, led_profile: dict | None = None) -> dict:
     """Actually restart algaesense-edge on the Pi, stopping whatever
-    experiment is currently running and starting a fresh one. Only call
-    this after the user has explicitly confirmed the corresponding
-    propose_start_new_experiment_run result. Returns the live dashboard
-    URL (if ALGAESENSE_DASHBOARD_URL is configured) so it can be shared
-    back to the user."""
-    return await apply_new_experiment_run(
-        reactor_id,
-        **_pi_ssh_config(),
-        dashboard_url=os.environ.get("ALGAESENSE_DASHBOARD_URL"),
-    )
+    experiment is currently running and starting a fresh one -- then, if
+    `led_profile` was given, wait for the fresh run to come back online
+    and start that profile. Only call this after the user has explicitly
+    confirmed the corresponding propose_start_new_experiment_run result.
+    Returns the live dashboard URL (if ALGAESENSE_DASHBOARD_URL is
+    configured) so it can be shared back to the user."""
+    edge = _build_edge_client() if led_profile else None
+    try:
+        return await apply_new_experiment_run(
+            reactor_id,
+            **_pi_ssh_config(),
+            dashboard_url=os.environ.get("ALGAESENSE_DASHBOARD_URL"),
+            led_profile=led_profile,
+            edge=edge,
+        )
+    finally:
+        if edge is not None:
+            await edge.close()
 
 
 @mcp.tool()
