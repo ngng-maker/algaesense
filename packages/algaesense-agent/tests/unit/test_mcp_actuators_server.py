@@ -97,3 +97,43 @@ async def test_get_recent_camera_readings_tool_returns_real_readings(monkeypatch
     result = await mcp.call_tool("get_recent_camera_readings", {"limit": 5})
 
     assert _payload(result) == [{"image_feature_vector": [1.0, 2.0, 3.0]}]
+
+
+async def test_propose_start_new_experiment_run_tool_returns_a_structured_proposal() -> None:
+    result = await mcp.call_tool("propose_start_new_experiment_run", {"reactor_id": "R01"})
+
+    payload = json.loads(result[0].text)
+    assert payload["reactor_id"] == "R01"
+    assert "restart" in payload["note"].lower()
+
+
+async def test_apply_start_new_experiment_run_tool_reads_pi_env_vars_and_reports_dashboard_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real SSH mechanics are exhaustively covered (against a genuine
+    local SSH server) in test_experiment_run.py -- this test only checks
+    the server layer's own job: reading the ALGAESENSE_PI_*/
+    ALGAESENSE_DASHBOARD_URL env vars and passing them through to
+    apply_new_experiment_run correctly."""
+    monkeypatch.setenv("ALGAESENSE_PI_HOST", "pi.example")
+    monkeypatch.setenv("ALGAESENSE_PI_USERNAME", "someuser")
+    monkeypatch.setenv("ALGAESENSE_PI_PASSWORD", "somepassword")
+    monkeypatch.setenv("ALGAESENSE_DASHBOARD_URL", "http://example-dashboard:8501")
+
+    captured_kwargs = {}
+
+    async def _fake_apply_new_experiment_run(reactor_id, **kwargs):
+        captured_kwargs["reactor_id"] = reactor_id
+        captured_kwargs.update(kwargs)
+        return {"reactor_id": reactor_id, "status": "restarted", "dashboard_url": kwargs.get("dashboard_url")}
+
+    monkeypatch.setattr(actuators_server, "apply_new_experiment_run", _fake_apply_new_experiment_run)
+
+    result = await mcp.call_tool("apply_start_new_experiment_run", {"reactor_id": "R01"})
+
+    payload = json.loads(result[0].text)
+    assert payload == {"reactor_id": "R01", "status": "restarted", "dashboard_url": "http://example-dashboard:8501"}
+    assert captured_kwargs["host"] == "pi.example"
+    assert captured_kwargs["username"] == "someuser"
+    assert captured_kwargs["password"] == "somepassword"
+    assert captured_kwargs["dashboard_url"] == "http://example-dashboard:8501"

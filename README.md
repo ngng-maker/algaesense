@@ -156,8 +156,9 @@ Once everything is running, most interaction happens in Slack. A few examples of
 - "Run a fleet-zero check on all sensors." (a health diagnostic)
 - "Start a ramp on the LED from 0 to 300 PAR over the next hour." — the assistant will describe exactly what this will do and wait for your go-ahead before starting it.
 - "Discover the light-response dynamics for this experiment." — feeds the experiment's real VOC trajectory and the light's actual applied brightness into the symbolic-regression engine to find the underlying equation.
+- "Start a new experiment run." — restarts `algaesense-edge` on the Pi (stopping whatever's currently running first) and gives you a clickable link to watch it live in the dashboard. See [`docs/remote_experiment_control.md`](docs/remote_experiment_control.md) for the one-time Pi-side setup this needs.
 
-Anything that would change the physical reactor (adjusting or scheduling the light) always follows a **propose → approve → apply** pattern — you'll see a plain description of the change before it happens, and nothing is applied until you say so.
+Anything that would change the physical reactor (adjusting or scheduling the light, or restarting acquisition to start a new run) always follows a **propose → approve → apply** pattern — you'll see a plain description of the change before it happens, and nothing is applied until you say so.
 
 ## Project layout
 

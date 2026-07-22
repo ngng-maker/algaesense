@@ -17,6 +17,7 @@ from algaesense_agent.mcp_actuators.actuators import (
     stop_led_profile,
 )
 from algaesense_agent.mcp_actuators.edge_client import EdgeClient
+from algaesense_agent.mcp_actuators.experiment_run import apply_new_experiment_run, propose_new_experiment_run
 
 
 """
@@ -135,6 +136,44 @@ async def get_recent_camera_readings(limit: int = 5) -> list[dict]:
         return await edge.recent_camera_readings(limit=limit)
     finally:
         await edge.close()
+
+
+def _pi_ssh_config() -> dict:
+    """Same ALGAESENSE_PI_* env vars as algaesense-dashboard-sync's
+    --pull-from-pi mode -- one Pi, one set of SSH credentials, reused
+    for both syncing data down and restarting the edge service."""
+    return {
+        "host": os.environ.get("ALGAESENSE_PI_HOST"),
+        "username": os.environ.get("ALGAESENSE_PI_USERNAME"),
+        "private_key_path": os.environ.get("ALGAESENSE_PI_PRIVATE_KEY") or None,
+        "password": os.environ.get("ALGAESENSE_PI_PASSWORD") or None,
+        "port": int(os.environ.get("ALGAESENSE_PI_PORT", "22")),
+    }
+
+
+@mcp.tool()
+def propose_start_new_experiment_run(reactor_id: str) -> dict:
+    """Describe starting a fresh experiment run for a reactor, without
+    doing it. This restarts algaesense-edge on the Pi -- always call
+    this before apply_start_new_experiment_run and show the result to
+    the user for confirmation, since it stops whatever is currently
+    running."""
+    return asdict(propose_new_experiment_run(reactor_id))
+
+
+@mcp.tool()
+async def apply_start_new_experiment_run(reactor_id: str) -> dict:
+    """Actually restart algaesense-edge on the Pi, stopping whatever
+    experiment is currently running and starting a fresh one. Only call
+    this after the user has explicitly confirmed the corresponding
+    propose_start_new_experiment_run result. Returns the live dashboard
+    URL (if ALGAESENSE_DASHBOARD_URL is configured) so it can be shared
+    back to the user."""
+    return await apply_new_experiment_run(
+        reactor_id,
+        **_pi_ssh_config(),
+        dashboard_url=os.environ.get("ALGAESENSE_DASHBOARD_URL"),
+    )
 
 
 @mcp.tool()

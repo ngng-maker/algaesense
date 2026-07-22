@@ -17,6 +17,8 @@ from __future__ import annotations
 import stat
 from pathlib import Path
 
+from algaesense_agent.pi_ssh import connect_to_pi
+
 
 def pull_and_delete_from_pi(
     host: str,
@@ -37,23 +39,7 @@ def pull_and_delete_from_pi(
     unattended, e.g. from a scheduled task, with nothing typed in) or
     `password` (works right away with whatever you already log into the
     Pi with, no key setup needed first)."""
-    if not private_key_path and not password:
-        raise ValueError("pull_and_delete_from_pi needs either private_key_path or password")
-
-    try:
-        import paramiko
-    except ImportError as exc:
-        raise ImportError(
-            "pull_and_delete_from_pi requires the 'sftp' extra (paramiko) -- "
-            "install with `pip install jaxsr-calibration[sftp]`."
-        ) from exc
-
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    if private_key_path:
-        client.connect(hostname=host, port=port, username=username, key_filename=str(private_key_path))
-    else:
-        client.connect(hostname=host, port=port, username=username, password=password)
+    client = connect_to_pi(host=host, username=username, private_key_path=private_key_path, password=password, port=port)
 
     try:
         sftp = client.open_sftp()
