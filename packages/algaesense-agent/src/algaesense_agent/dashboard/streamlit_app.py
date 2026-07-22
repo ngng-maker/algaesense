@@ -245,10 +245,18 @@ def _slack_panel() -> None:
 
 st.title("AlgaeSense")
 
+# Passing both value= and key= to a widget is a known Streamlit
+# footgun -- Streamlit's own docs warn the value= can silently
+# re-overwrite whatever the user just typed on a later rerun. Setting
+# the session-state default ONCE, before creating the widget, then
+# passing only key= (no value=) is the documented-safe way to give a
+# widget a default without that risk.
+if "edge_base_url" not in st.session_state:
+    st.session_state["edge_base_url"] = os.environ.get("ALGAESENSE_EDGE_BASE_URL", "http://localhost:8000")
+
 with st.sidebar:
     st.text_input(
         "algaesense-edge URL",
-        value=os.environ.get("ALGAESENSE_EDGE_BASE_URL", "http://localhost:8000"),
         key="edge_base_url",
         help="The reactor's Raspberry Pi network API address, e.g. http://192.168.1.42:8000",
     )
