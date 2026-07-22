@@ -1,4 +1,4 @@
-<img align="left" width="40" height="40" src="https://githubusercontent.com" alt="Project Logo" style="margin-right: 15px;">
+<img align="left" width="40" height="40" src="assets/Project_Logo.jpg" alt="Project Logo" style="margin-right: 15px;">
 # AlgaeSense
 
 AlgaeSense is a monitoring and control system for a small algae (*Arthrospira*/*Spirulina platensis*) cultivation reactor. It continuously watches the culture, can adjust its light, and lets you ask a conversational assistant (in Slack) to analyze results and suggest what experiment to try next — with a human approval step before anything actually touches the hardware.
