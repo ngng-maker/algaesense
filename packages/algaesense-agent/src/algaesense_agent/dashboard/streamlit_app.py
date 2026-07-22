@@ -10,9 +10,11 @@ import datetime as dt
 import os
 from pathlib import Path
 
+import altair as alt
 import httpx
 import pandas as pd
 import streamlit as st
+from jaxsr_calibration.camera.calibration import BiomassCameraModel, apply_biomass_calibration, load_biomass_calibration
 
 # NOTE ON COMMENT STYLE IN THIS FILE: Streamlit's "magic commands" feature
 # renders any bare top-level string expression as page content (confirmed
@@ -67,6 +69,36 @@ def _greenness(rgb: list[float]) -> float:
     return 2 * g - r - b
 
 
+# VOC_SENSOR_FULL_SCALE_MV/VOC_SENSOR_FULL_SCALE_PPM: a ROUGH PLACEHOLDER
+# linear conversion (raw ISB output spans 0-3.3V per algaesense-edge's
+# acquisition/voc.py, mapped straight across the sensor's stated 0-5 ppm
+# range), used ONLY until a real standard-addition calibration exists for
+# this sensor -- same spirit as this project's other documented
+# approximations (see CLAUDE.md's PAR-calibration gotcha). Once a real
+# calibration_run_id is entered in the sidebar, that's used instead and
+# this placeholder is skipped entirely.
+_VOC_SENSOR_FULL_SCALE_MV = 3300.0
+_VOC_SENSOR_FULL_SCALE_PPM = 5.0
+
+
+def _voc_ppm_placeholder(voltage_mv: float) -> float:
+    return (voltage_mv / _VOC_SENSOR_FULL_SCALE_MV) * _VOC_SENSOR_FULL_SCALE_PPM
+
+
+def _data_dir() -> Path:
+    return Path(os.environ.get("ALGAESENSE_DATA_DIR", "."))
+
+
+def _load_camera_calibration(calibration_run_id: str) -> BiomassCameraModel | None:
+    # Returns None (rather than raising) on any failure -- a missing or
+    # unreadable calibration run shouldn't crash the whole dashboard, just
+    # fall back to showing raw greenness with no blank-correction.
+    try:
+        return load_biomass_calibration(calibration_run_id, data_dir=_data_dir() / "derived" / "calibrations" / "camera_zero")
+    except Exception:
+        return None
+
+
 def _parse_timestamp(value: str) -> dt.datetime:
     # Every raw timestamp this app sees (live API or the history db) is an
     # ISO-8601 UTC string -- handles both a trailing "Z" and an explicit
@@ -117,18 +149,36 @@ def _render_readings(voc_rows: list[dict], camera_rows: list[dict]) -> None:
     with voc_col:
         st.subheader("VOC (PID sensor)")
         if voc_rows:
-            latest = voc_rows[-1]
-            st.metric("Latest reading (mV)", f"{latest['pid_voltage_mv']:.2f}")
+            # A real calibration_run_id (sidebar) would give a properly
+            # fitted ppm conversion (jaxsr_calibration.calibration.apply.
+            # apply_calibration) -- until one exists for this sensor, ppm
+            # values here use the rough placeholder linear scaling above,
+            # which is clearly labeled as such rather than presented as
+            # a real measurement.
+            ppm_values = [_voc_ppm_placeholder(row["pid_voltage_mv"]) for row in voc_rows]
+            st.metric("Latest reading (ppm, approx.)", f"{ppm_values[-1]:.2f}")
+            st.caption(
+                "Approximate placeholder conversion (linear across the sensor's stated "
+                "0-5 ppm range) -- run a standard-addition calibration via Slack for a real one."
+            )
             # x-axis: seconds since this experiment's first VOC reading,
             # not a raw timestamp -- much easier to read at the ~1 Hz
-            # sampling rate this sensor actually runs at.
+            # sampling rate this sensor actually runs at. Fixed y-axis
+            # domain [0, 5] (the sensor's stated range) needs an Altair
+            # chart -- st.line_chart auto-scales its axis and has no
+            # option to pin a fixed range.
             df = pd.DataFrame(
-                {
-                    "seconds_since_start": _elapsed_seconds_since_start(voc_rows),
-                    "pid_voltage_mv": [row["pid_voltage_mv"] for row in voc_rows],
-                }
-            ).set_index("seconds_since_start")
-            st.line_chart(df)
+                {"seconds_since_start": _elapsed_seconds_since_start(voc_rows), "ppm": ppm_values}
+            )
+            chart = (
+                alt.Chart(df)
+                .mark_line()
+                .encode(
+                    x=alt.X("seconds_since_start", title="Seconds since start"),
+                    y=alt.Y("ppm", title="ppm (approx.)", scale=alt.Scale(domain=[0, _VOC_SENSOR_FULL_SCALE_PPM])),
+                )
+            )
+            st.altair_chart(chart, use_container_width=True)
         else:
             st.info("No VOC readings yet.")
 
@@ -138,17 +188,37 @@ def _render_readings(voc_rows: list[dict], camera_rows: list[dict]) -> None:
         # a capture that failed partway through might not.
         scored_rows = [row for row in camera_rows if row.get("image_feature_vector")]
         if scored_rows:
-            latest_greenness = _greenness(scored_rows[-1]["image_feature_vector"])
-            st.metric("Latest greenness (2G-R-B)", f"{latest_greenness:.1f}")
+            camera_calibration_run_id = st.session_state.get("camera_calibration_run_id", "").strip()
+            calibration_model = _load_camera_calibration(camera_calibration_run_id) if camera_calibration_run_id else None
+
+            greenness_values = [_greenness(row["image_feature_vector"]) for row in scored_rows]
+            metric_cols = st.columns(2)
+            metric_cols[0].metric("Latest greenness (2G-R-B)", f"{greenness_values[-1]:.1f}")
+
+            df_data = {"hours_since_start": _elapsed_hours_since_start(scored_rows), "raw greenness": greenness_values}
+            if calibration_model is not None:
+                # apply_biomass_calibration returns a signal RELATIVE to
+                # the blank baseline (positive = greener/more biomass than
+                # clean medium), NOT an absolute concentration -- this
+                # project has no calibration mapping greenness to an
+                # absolute unit like g/L (that would need a second
+                # reference measurement, e.g. dry weight or OD, which
+                # doesn't exist here). See camera/calibration.py's own
+                # module docstring.
+                biomass_signal = [
+                    apply_biomass_calibration(row["image_feature_vector"], calibration_model) for row in scored_rows
+                ]
+                metric_cols[1].metric("Latest biomass signal (blank-corrected)", f"{biomass_signal[-1]:.1f}")
+                df_data["biomass signal (blank-corrected)"] = biomass_signal
+            elif camera_calibration_run_id:
+                st.caption(f"Could not load camera calibration {camera_calibration_run_id!r} -- showing raw greenness only.")
+            else:
+                st.caption("Enter a camera calibration_run_id in the sidebar for a blank-corrected biomass signal.")
+
             # x-axis: hours since this experiment's first camera capture --
             # the camera samples far less often (~hourly) than the VOC
             # sensor, so hours read more naturally here than seconds.
-            df = pd.DataFrame(
-                {
-                    "hours_since_start": _elapsed_hours_since_start(scored_rows),
-                    "greenness": [_greenness(row["image_feature_vector"]) for row in scored_rows],
-                }
-            ).set_index("hours_since_start")
+            df = pd.DataFrame(df_data).set_index("hours_since_start")
             st.line_chart(df)
         elif camera_rows:
             st.info("Camera readings present but missing feature vectors.")
@@ -253,12 +323,20 @@ st.title("AlgaeSense")
 # widget a default without that risk.
 if "edge_base_url" not in st.session_state:
     st.session_state["edge_base_url"] = os.environ.get("ALGAESENSE_EDGE_BASE_URL", "http://localhost:8000")
+if "camera_calibration_run_id" not in st.session_state:
+    st.session_state["camera_calibration_run_id"] = os.environ.get("ALGAESENSE_CAMERA_CALIBRATION_RUN_ID", "")
 
 with st.sidebar:
     st.text_input(
         "algaesense-edge URL",
         key="edge_base_url",
         help="The reactor's Raspberry Pi network API address, e.g. http://192.168.1.42:8000",
+    )
+    st.text_input(
+        "Camera calibration_run_id (optional)",
+        key="camera_calibration_run_id",
+        help="From a completed camera zero-point calibration (Slack) -- shows a blank-corrected "
+        "biomass signal alongside raw greenness when set.",
     )
     st.divider()
     view = st.radio("View", ["Live", "Past experiment"], key="dashboard_view")
