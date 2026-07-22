@@ -9,7 +9,11 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-from algaesense_agent.mcp_pipeline.pipeline import fit_symbolic_model, suggest_next_experiments
+from algaesense_agent.mcp_pipeline.pipeline import (
+    fit_symbolic_model,
+    suggest_next_experiments,
+    suggest_next_experiments_with_context,
+)
 from algaesense_agent.mcp_pipeline.pipeline import discover_led_response_dynamics as _discover_led_response_dynamics
 
 
@@ -37,6 +41,13 @@ def _data_dir() -> Path:
     assume) for local development.
     """
     return Path(os.environ.get("ALGAESENSE_DATA_DIR", "data"))
+
+
+def _wiki_root() -> Path:
+    """Where labwiki pages live -- same `ALGAESENSE_LABWIKI_ROOT` env var
+    `mcp_labwiki`'s own server already uses, so both point at the same
+    archive without needing a second, separately-configured path."""
+    return Path(os.environ.get("ALGAESENSE_LABWIKI_ROOT", "data/labwiki"))
 
 
 @mcp.tool()
@@ -83,6 +94,57 @@ def suggest_next_experiment_conditions(
         "scores": result.scores,
         "acquisition": result.acquisition,
         "fit": asdict(result.fit),
+    }
+
+
+@mcp.tool()
+def suggest_next_experiment_conditions_with_context(
+    campaign_id: str,
+    target: str = "mean_voc_ppm_asgas",
+    feature_columns: list[str] | None = None,
+    n_points: int = 3,
+    kappa: float = 2.0,
+    max_terms: int = 5,
+    extra_topics: list[str] | None = None,
+) -> dict:
+    """Same as suggest_next_experiment_conditions, plus relevant labwiki
+    findings for the campaign and every condition/target involved --
+    prior operator notes, fit expressions, and active-learning proposals
+    already recorded for these same things, surfaced alongside the new
+    quantitative suggestion so you don't have to separately call
+    query_labwiki_topic to check. Prefer this over the plain
+    suggest_next_experiment_conditions when discussing what to try next
+    with the operator, since it gives them the fuller picture in one
+    response; the plain version is still fine for a quick numeric-only
+    check."""
+    result = suggest_next_experiments_with_context(
+        campaign_id,
+        data_dir=_data_dir(),
+        wiki_root=_wiki_root(),
+        target=target,
+        feature_columns=feature_columns,
+        n_points=n_points,
+        kappa=kappa,
+        max_terms=max_terms,
+        extra_topics=extra_topics,
+    )
+    return {
+        "suggestion": {
+            "points": result.suggestion.points,
+            "scores": result.suggestion.scores,
+            "acquisition": result.suggestion.acquisition,
+            "fit": asdict(result.suggestion.fit),
+        },
+        "labwiki_context": [
+            {
+                "topic": context.topic,
+                "findings": [
+                    {"path": str(finding.path), "matching_lines": finding.matching_lines, "full_content": finding.full_content}
+                    for finding in context.findings
+                ],
+            }
+            for context in result.labwiki_context
+        ],
     }
 
 

@@ -15,6 +15,7 @@ import polars as pl
 from jaxsr_calibration.calibration.apply import apply_calibration
 from jaxsr_calibration.processing.features import load_features_for_jaxsr, load_timeseries_for_jaxsr
 
+from algaesense_agent.labwiki.wiki import query_labwiki
 from algaesense_agent.raw_readers import load_raw_voc_readings
 
 
@@ -208,6 +209,104 @@ def suggest_next_experiments(
         acquisition=result.acquisition,
         fit=fit,
     )
+
+
+@dataclass
+class LabwikiFinding:
+    """One matched page's full content, not just the lines `query_labwiki`
+    happened to filter on. A page's most useful content (an operator's
+    note, a fit expression) is often on a DIFFERENT line than the
+    condition name that made it match -- e.g. a summary page's "Campaign:
+    [[camp_01]]" line and its "## Notes" section are both real, useful
+    parts of the same page, but only one of them literally contains the
+    search term. Returning the whole page, not just the matching lines,
+    is what actually makes "relevant past findings" useful here."""
+
+    path: Path
+    matching_lines: list[str]
+    full_content: str
+
+
+@dataclass
+class LabwikiContext:
+    """Every labwiki page that mentioned one topic, surfaced alongside a
+    JAXSR suggestion so a human deciding what to try next sees relevant
+    prior findings without a separate query_labwiki_topic call."""
+
+    topic: str
+    findings: list[LabwikiFinding]
+
+
+@dataclass
+class SuggestionWithContext:
+    """A JAXSR active-learning suggestion, plus whatever the labwiki
+    already says about the conditions/target involved."""
+
+    suggestion: SuggestionResult
+    labwiki_context: list[LabwikiContext]
+
+
+def suggest_next_experiments_with_context(
+    campaign_id: str,
+    data_dir: Path,
+    wiki_root: Path,
+    target: str = "mean_voc_ppm_asgas",
+    feature_columns: list[str] | None = None,
+    n_points: int = 3,
+    kappa: float = 2.0,
+    max_terms: int = 5,
+    extra_topics: list[str] | None = None,
+) -> SuggestionWithContext:
+    """`suggest_next_experiments`, plus a labwiki lookup for each
+    condition/target JAXSR's fit actually used -- surfacing relevant past
+    findings (operator notes, prior fit expressions, prior active-learning
+    proposals) alongside the new quantitative suggestion.
+
+    This does NOT feed labwiki content into JAXSR itself -- `jaxsr`'s
+    active learner is a numerical optimizer with no notion of free-text
+    knowledge, and nothing about its actual math changes here. What this
+    adds is a query_labwiki_topic lookup, run automatically for the
+    campaign and every feature/target name the fit used, so a human (or
+    the agent, before relaying the suggestion) sees relevant qualitative
+    history in the same response instead of needing a separate lookup --
+    the same "read the compiled knowledge directly" idea query_labwiki_topic
+    already uses on its own, just triggered automatically here rather than
+    requiring someone to think to ask for it.
+    """
+    suggestion = suggest_next_experiments(
+        campaign_id,
+        data_dir,
+        target=target,
+        feature_columns=feature_columns,
+        n_points=n_points,
+        kappa=kappa,
+        max_terms=max_terms,
+    )
+
+    """
+    `dict.fromkeys(...)` dedupes while preserving order -- the campaign_id
+    and target are always searched, plus every feature name the fit
+    actually selected (the concrete conditions this suggestion is about),
+    plus any caller-supplied extras (e.g. an entity ID not captured by
+    the fit's own feature names).
+    """
+    topics = list(dict.fromkeys([campaign_id, target, *suggestion.fit.feature_names, *(extra_topics or [])]))
+
+    labwiki_context = [
+        LabwikiContext(topic=topic, findings=findings)
+        for topic in topics
+        if (findings := _labwiki_findings_for_topic(campaign_id, topic, wiki_root))
+    ]
+
+    return SuggestionWithContext(suggestion=suggestion, labwiki_context=labwiki_context)
+
+
+def _labwiki_findings_for_topic(campaign_id: str, topic: str, wiki_root: Path) -> list[LabwikiFinding]:
+    matches = query_labwiki(campaign_id, topic, wiki_root)
+    return [
+        LabwikiFinding(path=match.path, matching_lines=match.matching_lines, full_content=match.path.read_text(encoding="utf-8"))
+        for match in matches
+    ]
 
 
 @dataclass

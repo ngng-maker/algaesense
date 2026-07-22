@@ -15,12 +15,15 @@ from jaxsr_calibration.calibration.apply import persist_calibration
 from jaxsr_calibration.calibration.standard_addition import fit_sensitivity_per_sensor
 from jaxsr_calibration.logging_.schema import VOC_RAW_SCHEMA
 
+from algaesense_agent.labwiki.models import ExperimentResult
+from algaesense_agent.labwiki.wiki import ingest_experiment_result
 from algaesense_agent.mcp_pipeline.pipeline import (
     CampaignNotFoundError,
     discover_led_response_dynamics,
     fit_symbolic_model,
     load_campaign_features,
     suggest_next_experiments,
+    suggest_next_experiments_with_context,
 )
 
 
@@ -109,6 +112,124 @@ def test_suggest_next_experiments_returns_points_within_observed_bounds(tmp_path
     lo, hi = result.fit.feature_bounds[0]
     for point in result.points:
         assert lo <= point["par_umol_m2_s"] <= hi
+
+
+def test_suggest_next_experiments_with_context_surfaces_matching_labwiki_pages(tmp_path: Path) -> None:
+    """Combines the same synthetic numeric campaign this file already
+    uses for suggest_next_experiments with a real, separately-ingested
+    labwiki entry -- confirming the combined function actually surfaces
+    that qualitative finding alongside JAXSR's quantitative suggestion,
+    not just that the right functions got called."""
+    _write_synthetic_campaign(tmp_path, "camp_01")
+    wiki_root = tmp_path / "labwiki"
+    ingest_experiment_result(
+        ExperimentResult(
+            experiment_id="exp_00",
+            campaign_id="camp_01",
+            reactor_id="R01",
+            sensor_id="PID01",
+            conditions={"par_umol_m2_s": 100.0},
+            target_metrics={"mean_voc_ppm_asgas": 205.0},
+            operator_notes=["lamp looked dim at the start of this run, worth rechecking"],
+        ),
+        wiki_root=wiki_root,
+    )
+
+    result = suggest_next_experiments_with_context(
+        "camp_01",
+        data_dir=tmp_path,
+        wiki_root=wiki_root,
+        target="mean_voc_ppm_asgas",
+        feature_columns=["par_umol_m2_s"],
+        n_points=3,
+    )
+
+    assert len(result.suggestion.points) == 3
+    topics_with_matches = {context.topic for context in result.labwiki_context}
+    assert "camp_01" in topics_with_matches
+    assert "par_umol_m2_s" in topics_with_matches
+
+    """
+    The operator's note is a different LINE than the "par_umol_m2_s"
+    condition on the same summary page -- query_labwiki's own line-level
+    matching wouldn't put it in matching_lines for this topic, which is
+    exactly why LabwikiFinding also carries the whole page's full_content:
+    the note is real, relevant context on the SAME page that matched,
+    even though it isn't on the literal matching line.
+    """
+    par_context = next(c for c in result.labwiki_context if c.topic == "par_umol_m2_s")
+    assert any("lamp looked dim" in finding.full_content for finding in par_context.findings)
+
+
+def test_suggest_next_experiments_with_context_returns_no_context_for_an_unrelated_topic(tmp_path: Path) -> None:
+    """No labwiki content exists at all here -- confirms an empty wiki
+    just yields an empty labwiki_context list rather than an error."""
+    _write_synthetic_campaign(tmp_path, "camp_01")
+
+    result = suggest_next_experiments_with_context(
+        "camp_01",
+        data_dir=tmp_path,
+        wiki_root=tmp_path / "empty_labwiki",
+        target="mean_voc_ppm_asgas",
+        feature_columns=["par_umol_m2_s"],
+        n_points=2,
+    )
+
+    assert result.labwiki_context == []
+
+
+async def test_mcp_server_suggest_with_context_tool_matches_direct_pipeline_call(tmp_path: Path, monkeypatch) -> None:
+    """Same server-vs-direct-call parity check as the fit tool test below,
+    for the new combined tool."""
+    _write_synthetic_campaign(tmp_path, "camp_01")
+    wiki_root = tmp_path / "labwiki"
+    ingest_experiment_result(
+        ExperimentResult(
+            experiment_id="exp_00",
+            campaign_id="camp_01",
+            reactor_id="R01",
+            sensor_id="PID01",
+            conditions={"par_umol_m2_s": 100.0},
+            target_metrics={"mean_voc_ppm_asgas": 205.0},
+            operator_notes=["clean baseline run"],
+        ),
+        wiki_root=wiki_root,
+    )
+    monkeypatch.setenv("ALGAESENSE_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ALGAESENSE_LABWIKI_ROOT", str(wiki_root))
+
+    import importlib
+
+    from algaesense_agent.mcp_pipeline import server as server_module
+
+    importlib.reload(server_module)
+
+    direct_result = suggest_next_experiments_with_context(
+        "camp_01", data_dir=tmp_path, wiki_root=wiki_root, feature_columns=["par_umol_m2_s"], n_points=2
+    )
+
+    tool_result = await server_module.mcp.call_tool(
+        "suggest_next_experiment_conditions_with_context",
+        {"campaign_id": "camp_01", "feature_columns": ["par_umol_m2_s"], "n_points": 2},
+    )
+
+    import json
+
+    structured = json.loads(tool_result[0].text)
+
+    """
+    Not asserting exact point-value equality here: jaxsr.ActiveLearner's
+    suggest() involves randomness with no seed threaded through, so two
+    independent calls (direct + through the tool) can legitimately land
+    on different candidate points, same reasoning already applied to
+    suggest_next_experiment_conditions elsewhere in this file (no
+    equivalent exact-match test exists for that tool either). What
+    matters here is that the server wiring produces the same SHAPE of
+    result and finds the same labwiki topics, not bit-identical numbers.
+    """
+    assert len(structured["suggestion"]["points"]) == len(direct_result.suggestion.points)
+    assert set(structured["suggestion"]["points"][0].keys()) == {"par_umol_m2_s"}
+    assert {c["topic"] for c in structured["labwiki_context"]} == {c.topic for c in direct_result.labwiki_context}
 
 
 async def test_mcp_server_fit_tool_matches_direct_pipeline_call(tmp_path: Path, monkeypatch) -> None:
