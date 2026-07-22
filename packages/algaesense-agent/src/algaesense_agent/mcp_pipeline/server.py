@@ -50,6 +50,14 @@ def _wiki_root() -> Path:
     return Path(os.environ.get("ALGAESENSE_LABWIKI_ROOT", "data/labwiki"))
 
 
+def _convert_bound_overrides(raw: dict[str, list[float]] | None) -> dict[str, tuple[float, float]] | None:
+    """MCP tool arguments are plain JSON -- a `[lo, hi]` list, not a
+    Python tuple -- converted here once rather than at every call site."""
+    if raw is None:
+        return None
+    return {name: (float(bounds[0]), float(bounds[1])) for name, bounds in raw.items()}
+
+
 @mcp.tool()
 def fit_campaign_model(
     campaign_id: str,
@@ -77,9 +85,16 @@ def suggest_next_experiment_conditions(
     n_points: int = 3,
     kappa: float = 2.0,
     max_terms: int = 5,
+    bound_overrides: dict[str, list[float]] | None = None,
 ) -> dict:
     """Suggest the next experimental conditions to run for a campaign,
-    using active learning over the current fit."""
+    using active learning over the current fit. `bound_overrides` (e.g.
+    `{"par_umol_m2_s": [0.0, 300.0]}`) narrows the range JAXSR actually
+    searches within for named features -- only narrows the observed
+    data range, never widens past it. Use this when a genuine finding
+    (from labwiki, or from your own reasoning over the fit/data) implies
+    a real constraint on where the next experiment should land; don't
+    use it just to nudge the suggestion toward a value you'd prefer."""
     result = suggest_next_experiments(
         campaign_id,
         data_dir=_data_dir(),
@@ -88,12 +103,14 @@ def suggest_next_experiment_conditions(
         n_points=n_points,
         kappa=kappa,
         max_terms=max_terms,
+        bound_overrides=_convert_bound_overrides(bound_overrides),
     )
     return {
         "points": result.points,
         "scores": result.scores,
         "acquisition": result.acquisition,
         "fit": asdict(result.fit),
+        "search_bounds": result.search_bounds,
     }
 
 
@@ -106,6 +123,7 @@ def suggest_next_experiment_conditions_with_context(
     kappa: float = 2.0,
     max_terms: int = 5,
     extra_topics: list[str] | None = None,
+    bound_overrides: dict[str, list[float]] | None = None,
 ) -> dict:
     """Same as suggest_next_experiment_conditions, plus relevant labwiki
     findings for the campaign and every condition/target involved --
@@ -116,7 +134,18 @@ def suggest_next_experiment_conditions_with_context(
     suggest_next_experiment_conditions when discussing what to try next
     with the operator, since it gives them the fuller picture in one
     response; the plain version is still fine for a quick numeric-only
-    check."""
+    check.
+
+    Recommended two-step workflow when you actually want labwiki findings
+    to change the suggestion, not just sit alongside it: (1) call this
+    once with no `bound_overrides` to see JAXSR's baseline suggestion and
+    the labwiki context together; (2) if something in the fit's own
+    trends or the labwiki findings' full_content implies a genuine,
+    concrete constraint (a documented problem above/below some value --
+    not vague speculation), call this again *with* `bound_overrides`
+    reflecting it, and present both results to the operator along with
+    your reasoning for the adjustment, rather than only showing the
+    adjusted one."""
     result = suggest_next_experiments_with_context(
         campaign_id,
         data_dir=_data_dir(),
@@ -127,6 +156,7 @@ def suggest_next_experiment_conditions_with_context(
         kappa=kappa,
         max_terms=max_terms,
         extra_topics=extra_topics,
+        bound_overrides=_convert_bound_overrides(bound_overrides),
     )
     return {
         "suggestion": {
@@ -134,6 +164,7 @@ def suggest_next_experiment_conditions_with_context(
             "scores": result.suggestion.scores,
             "acquisition": result.suggestion.acquisition,
             "fit": asdict(result.suggestion.fit),
+            "search_bounds": result.suggestion.search_bounds,
         },
         "labwiki_context": [
             {

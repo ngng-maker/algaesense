@@ -114,6 +114,69 @@ def test_suggest_next_experiments_returns_points_within_observed_bounds(tmp_path
         assert lo <= point["par_umol_m2_s"] <= hi
 
 
+def test_suggest_next_experiments_with_bound_overrides_actually_narrows_the_search(tmp_path: Path) -> None:
+    """The real behavioral change this feature is for: every suggested
+    point must now fall within the NARROWED range, not just the full
+    observed data range -- confirming bound_overrides genuinely changes
+    what JAXSR searches over, not just that the argument is accepted."""
+    _write_synthetic_campaign(tmp_path, "camp_01")  # observed par range is ~100-500
+
+    result = suggest_next_experiments(
+        "camp_01",
+        data_dir=tmp_path,
+        target="mean_voc_ppm_asgas",
+        feature_columns=["par_umol_m2_s"],
+        n_points=5,
+        bound_overrides={"par_umol_m2_s": (100.0, 250.0)},
+    )
+
+    assert result.search_bounds == [(100.0, 250.0)]
+    for point in result.points:
+        assert 100.0 <= point["par_umol_m2_s"] <= 250.0
+
+
+def test_bound_overrides_can_only_narrow_never_widen_past_observed_data(tmp_path: Path) -> None:
+    _write_synthetic_campaign(tmp_path, "camp_01")  # observed par range is ~100-500
+
+    result = suggest_next_experiments(
+        "camp_01",
+        data_dir=tmp_path,
+        target="mean_voc_ppm_asgas",
+        feature_columns=["par_umol_m2_s"],
+        n_points=2,
+        bound_overrides={"par_umol_m2_s": (0.0, 10000.0)},
+    )
+
+    lo, hi = result.fit.feature_bounds[0]
+    assert result.search_bounds == [(lo, hi)]  # clamped to the real observed range, not widened to (0, 10000)
+
+
+def test_bound_overrides_rejects_an_unknown_feature_name(tmp_path: Path) -> None:
+    _write_synthetic_campaign(tmp_path, "camp_01")
+
+    with pytest.raises(ValueError, match="unknown feature"):
+        suggest_next_experiments(
+            "camp_01",
+            data_dir=tmp_path,
+            target="mean_voc_ppm_asgas",
+            feature_columns=["par_umol_m2_s"],
+            bound_overrides={"not_a_real_feature": (0.0, 1.0)},
+        )
+
+
+def test_bound_overrides_rejects_a_range_with_no_overlap_at_all(tmp_path: Path) -> None:
+    _write_synthetic_campaign(tmp_path, "camp_01")  # observed par range is ~100-500
+
+    with pytest.raises(ValueError, match="doesn't overlap"):
+        suggest_next_experiments(
+            "camp_01",
+            data_dir=tmp_path,
+            target="mean_voc_ppm_asgas",
+            feature_columns=["par_umol_m2_s"],
+            bound_overrides={"par_umol_m2_s": (600.0, 700.0)},
+        )
+
+
 def test_suggest_next_experiments_with_context_surfaces_matching_labwiki_pages(tmp_path: Path) -> None:
     """Combines the same synthetic numeric campaign this file already
     uses for suggest_next_experiments with a real, separately-ingested
@@ -230,6 +293,39 @@ async def test_mcp_server_suggest_with_context_tool_matches_direct_pipeline_call
     assert len(structured["suggestion"]["points"]) == len(direct_result.suggestion.points)
     assert set(structured["suggestion"]["points"][0].keys()) == {"par_umol_m2_s"}
     assert {c["topic"] for c in structured["labwiki_context"]} == {c.topic for c in direct_result.labwiki_context}
+
+
+async def test_mcp_server_suggest_tool_bound_overrides_narrow_the_real_search(tmp_path: Path, monkeypatch) -> None:
+    """Confirms the MCP tool layer's JSON-friendly [lo, hi] list gets
+    converted correctly and genuinely narrows what gets searched --
+    through the actual FastMCP call_tool path, not just the pipeline
+    function directly."""
+    _write_synthetic_campaign(tmp_path, "camp_01")  # observed par range is ~100-500
+    monkeypatch.setenv("ALGAESENSE_DATA_DIR", str(tmp_path))
+
+    import importlib
+
+    from algaesense_agent.mcp_pipeline import server as server_module
+
+    importlib.reload(server_module)
+
+    tool_result = await server_module.mcp.call_tool(
+        "suggest_next_experiment_conditions",
+        {
+            "campaign_id": "camp_01",
+            "feature_columns": ["par_umol_m2_s"],
+            "n_points": 4,
+            "bound_overrides": {"par_umol_m2_s": [100.0, 200.0]},
+        },
+    )
+
+    import json
+
+    structured = json.loads(tool_result[0].text)
+
+    assert structured["search_bounds"] == [[100.0, 200.0]]
+    for point in structured["points"]:
+        assert 100.0 <= point["par_umol_m2_s"] <= 200.0
 
 
 async def test_mcp_server_fit_tool_matches_direct_pipeline_call(tmp_path: Path, monkeypatch) -> None:

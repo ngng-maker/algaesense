@@ -142,6 +142,54 @@ class SuggestionResult:
     scores: list[float]
     acquisition: str
     fit: FitResult
+    search_bounds: list[tuple[float, float]]
+    """
+    The bounds actually searched -- equal to `fit.feature_bounds` (the
+    full observed data range) unless `bound_overrides` narrowed some of
+    them. Reported separately from `fit.feature_bounds` so a caller can
+    always see both "what the data covers" and "what was actually
+    searched this time", rather than one silently standing in for the
+    other.
+    """
+
+
+def _apply_bound_overrides(
+    feature_names: list[str],
+    feature_bounds: list[tuple[float, float]],
+    bound_overrides: dict[str, tuple[float, float]] | None,
+) -> list[tuple[float, float]]:
+    """Narrow (never widen) the data-derived search bounds for named
+    features. Deliberately intersection-only, not a free override --
+    letting a caller tell JAXSR to search somewhere it has zero actual
+    data would mean searching outside the range the fit's own validity
+    was ever established on, a real statistical-validity concern, not
+    just a safety one (every setpoint still gets independently
+    re-validated against the reactor's hard safety bounds when it's
+    actually applied, regardless of what JAXSR searched over -- this is
+    a separate, additional restriction on top of that)."""
+    if not bound_overrides:
+        return feature_bounds
+
+    unknown = set(bound_overrides) - set(feature_names)
+    if unknown:
+        raise ValueError(
+            f"bound_overrides mentions unknown feature(s) {sorted(unknown)}; this fit's features are {feature_names}"
+        )
+
+    narrowed = []
+    for name, (lo, hi) in zip(feature_names, feature_bounds):
+        if name not in bound_overrides:
+            narrowed.append((lo, hi))
+            continue
+        override_lo, override_hi = bound_overrides[name]
+        new_lo, new_hi = max(lo, override_lo), min(hi, override_hi)
+        if new_lo > new_hi:
+            raise ValueError(
+                f"bound_overrides for {name!r} ({override_lo}, {override_hi}) doesn't overlap the observed "
+                f"data range ({lo}, {hi}) at all"
+            )
+        narrowed.append((new_lo, new_hi))
+    return narrowed
 
 
 def suggest_next_experiments(
@@ -152,9 +200,18 @@ def suggest_next_experiments(
     n_points: int = 3,
     kappa: float = 2.0,
     max_terms: int = 5,
+    bound_overrides: dict[str, tuple[float, float]] | None = None,
 ) -> SuggestionResult:
     """Fit a model over one campaign, then suggest the next `n_points`
-    experimental conditions to try."""
+    experimental conditions to try.
+
+    `bound_overrides` (e.g. `{"par_umol_m2_s": (0.0, 300.0)}`) narrows
+    the range JAXSR actually searches within, for named features --
+    this is how a genuine scientific insight (a documented problem
+    above some value, a known-bad range) can actually change what gets
+    suggested, rather than just being displayed alongside it unchanged.
+    Only narrows the observed data range, never widens past it -- see
+    `_apply_bound_overrides`."""
 
     """
     `include_categorical=False` here specifically: active learning needs a
@@ -183,9 +240,11 @@ def suggest_next_experiments(
     model = jaxsr.SymbolicRegressor(basis_library=library, max_terms=max_terms)
     model.fit(X, y)
 
+    search_bounds = _apply_bound_overrides(fit.feature_names, fit.feature_bounds, bound_overrides)
+
     learner = jaxsr.ActiveLearner(
         model=model,
-        bounds=fit.feature_bounds,
+        bounds=search_bounds,
         acquisition=jaxsr.UCB(kappa=kappa),
     )
     result = learner.suggest(n_points=n_points)
@@ -208,6 +267,7 @@ def suggest_next_experiments(
         scores=[float(s) for s in result.scores],
         acquisition=result.acquisition,
         fit=fit,
+        search_bounds=search_bounds,
     )
 
 
@@ -256,22 +316,29 @@ def suggest_next_experiments_with_context(
     kappa: float = 2.0,
     max_terms: int = 5,
     extra_topics: list[str] | None = None,
+    bound_overrides: dict[str, tuple[float, float]] | None = None,
 ) -> SuggestionWithContext:
     """`suggest_next_experiments`, plus a labwiki lookup for each
     condition/target JAXSR's fit actually used -- surfacing relevant past
     findings (operator notes, prior fit expressions, prior active-learning
     proposals) alongside the new quantitative suggestion.
 
-    This does NOT feed labwiki content into JAXSR itself -- `jaxsr`'s
-    active learner is a numerical optimizer with no notion of free-text
-    knowledge, and nothing about its actual math changes here. What this
-    adds is a query_labwiki_topic lookup, run automatically for the
-    campaign and every feature/target name the fit used, so a human (or
-    the agent, before relaying the suggestion) sees relevant qualitative
-    history in the same response instead of needing a separate lookup --
-    the same "read the compiled knowledge directly" idea query_labwiki_topic
-    already uses on its own, just triggered automatically here rather than
-    requiring someone to think to ask for it.
+    `jaxsr`'s active learner still never reads labwiki content directly
+    -- it has no notion of free-text knowledge, and nothing about that
+    changes here. What this function does two separable things: (1) it
+    runs a query_labwiki_topic lookup, automatically, for the campaign
+    and every feature/target name the fit used, so a human (or the
+    agent, before relaying the suggestion) sees relevant qualitative
+    history in the same response instead of needing a separate lookup;
+    (2) if the CALLER (a human, or an agent that already read those
+    labwiki findings and decided one implies a real constraint) passes
+    `bound_overrides`, that genuinely changes what JAXSR searches over
+    -- see `suggest_next_experiments`'s own docstring. The intended
+    workflow: call this once with no `bound_overrides` to get JAXSR's
+    baseline suggestion plus the labwiki context, read/reason over both,
+    then call it again *with* `bound_overrides` if something in the
+    labwiki findings warrants narrowing the search -- comparing both
+    results rather than only ever seeing the adjusted one.
     """
     suggestion = suggest_next_experiments(
         campaign_id,
@@ -281,6 +348,7 @@ def suggest_next_experiments_with_context(
         n_points=n_points,
         kappa=kappa,
         max_terms=max_terms,
+        bound_overrides=bound_overrides,
     )
 
     """
