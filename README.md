@@ -1,6 +1,6 @@
 
 <p align="center">
-  <img src="assets/Project_Logo.jpg" width="40" alt="Logo">
+  <img src="assets/Project_Logo.jpg" width="100" alt="Logo">
   <br>
   <h1 align="center">AlgaeSense</h1>
 </p>
