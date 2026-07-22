@@ -15,9 +15,12 @@ import pytest
 
 paramiko = pytest.importorskip("paramiko", reason="paramiko (the 'sftp' extra) isn't installed in this environment")
 
+import http.server
+
 from algaesense_agent.mcp_actuators.edge_client import EdgeClient
 from algaesense_agent.mcp_actuators.experiment_run import (
     apply_new_experiment_run,
+    ensure_dashboard_running,
     propose_new_experiment_run,
     restart_edge_service,
     wait_for_edge_healthy,
@@ -239,3 +242,71 @@ def test_propose_new_experiment_run_without_led_profile_says_led_stays_off() -> 
 
     assert proposal.led_profile is None
     assert "LED will stay off" in proposal.note
+
+
+class _HealthHandler(http.server.BaseHTTPRequestHandler):
+    """A real, minimal local HTTP server standing in for a running
+    Streamlit instance -- just enough to answer `/_stcore/health` the
+    way the real thing does, over a genuine socket."""
+
+    def do_GET(self):
+        if self.path == "/_stcore/health":
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, *args):
+        pass  # keep test output quiet
+
+
+@pytest.fixture
+def real_local_http_server():
+    server = http.server.HTTPServer(("127.0.0.1", 0), _HealthHandler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield port
+    server.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_ensure_dashboard_running_returns_true_when_already_up(real_local_http_server) -> None:
+    already_running = await ensure_dashboard_running(f"http://localhost:{real_local_http_server}")
+
+    assert already_running is True
+
+
+@pytest.mark.asyncio
+async def test_ensure_dashboard_running_launches_streamlit_when_not_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured_args = {}
+
+    def _fake_popen(args, **kwargs):
+        captured_args["args"] = args
+        return None
+
+    monkeypatch.setattr("subprocess.Popen", _fake_popen)
+
+    already_running = await ensure_dashboard_running("http://localhost:59999", health_timeout_s=0.3)
+
+    assert already_running is False
+    assert "streamlit" in captured_args["args"]
+    assert "run" in captured_args["args"]
+    assert "59999" in captured_args["args"]
+
+
+@pytest.mark.asyncio
+async def test_ensure_dashboard_running_skips_non_local_urls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Can't launch a process on a remote machine from here -- must not
+    even try (and must not falsely claim it's running either)."""
+
+    def _fake_popen(*args, **kwargs):
+        raise AssertionError("should never attempt to launch a process for a non-local URL")
+
+    monkeypatch.setattr("subprocess.Popen", _fake_popen)
+
+    already_running = await ensure_dashboard_running("http://100.64.1.2:8501")
+
+    assert already_running is False

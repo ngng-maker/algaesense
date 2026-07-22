@@ -19,6 +19,8 @@ One new one, so the assistant can hand you a clickable link once the restart suc
 
 - `ALGAESENSE_DASHBOARD_URL` — e.g. `http://localhost:8501` if Slack and the dashboard run on the same machine, or the machine's LAN address if you'll open Slack from somewhere else on the same network.
 
+If `ALGAESENSE_DASHBOARD_URL` points at `localhost`/`127.0.0.1` (i.e. the dashboard is meant to run on this same machine), `apply_start_new_experiment_run` checks whether Streamlit is already running there and **launches it automatically if not**, so the link actually works the moment you click it rather than needing you to have started it yourself first. This only works for a local URL — there's no way to start a process on a different machine just from a URL, so a LAN/remote `ALGAESENSE_DASHBOARD_URL` is handed back as-is with no auto-start attempt; make sure Streamlit is already running there yourself (e.g. via the Windows Startup `.bat` file described in the main README) in that case.
+
 ## One-time Pi-side setup: passwordless sudo for exactly this command
 
 Running `sudo systemctl restart algaesense-edge` over a scripted SSH connection needs to happen without a password prompt — there's no terminal on the other end to type one into. This needs a **narrowly-scoped** sudoers rule, not blanket passwordless sudo:

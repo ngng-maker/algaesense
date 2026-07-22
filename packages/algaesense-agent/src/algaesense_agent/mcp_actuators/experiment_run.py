@@ -12,7 +12,13 @@ the Pi.
 from __future__ import annotations
 
 import asyncio
+import subprocess
+import sys
 from dataclasses import dataclass
+from pathlib import Path
+from urllib.parse import urlparse
+
+import httpx
 
 from algaesense_agent.mcp_actuators.actuators import apply_led_profile
 from algaesense_agent.mcp_actuators.edge_client import EdgeClient
@@ -97,6 +103,49 @@ async def wait_for_edge_healthy(edge: EdgeClient, timeout_s: float = 30.0, poll_
     raise TimeoutError(f"algaesense-edge did not become healthy within {timeout_s}s") from last_exc
 
 
+async def ensure_dashboard_running(dashboard_url: str, health_timeout_s: float = 2.0) -> bool:
+    """If `dashboard_url` points at THIS machine (localhost/127.0.0.1 --
+    the only case a link handed back in a chat reply can actually be
+    auto-started, since there's no way to launch a process on a remote
+    machine from here) and nothing's answering there yet, launch
+    Streamlit in the background so the link works the moment it's
+    clicked, rather than the operator having to remember to start it
+    themselves first. Returns True if it was already running, False if
+    this function just started it (or couldn't -- e.g. a non-local URL)."""
+    parsed = urlparse(dashboard_url)
+    if parsed.hostname not in ("localhost", "127.0.0.1"):
+        return False
+
+    try:
+        async with httpx.AsyncClient(timeout=health_timeout_s) as client:
+            response = await client.get(f"{parsed.scheme}://{parsed.netloc}/_stcore/health")
+            if response.status_code == 200:
+                return True
+    except httpx.HTTPError:
+        pass
+
+    """
+    `algaesense_agent.dashboard.streamlit_app.__file__` resolves the
+    script's real installed path, rather than needing a separate
+    hardcoded/configured path to it -- this always matches whatever
+    version of the package is actually running this MCP server.
+    """
+    import algaesense_agent.dashboard.streamlit_app as streamlit_app_module
+
+    script_path = Path(streamlit_app_module.__file__)
+    port = parsed.port or 8501
+
+    creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    subprocess.Popen(
+        [sys.executable, "-m", "streamlit", "run", str(script_path), "--server.port", str(port), "--server.headless", "true"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+        creationflags=creationflags,
+    )
+    return False
+
+
 async def apply_new_experiment_run(
     reactor_id: str,
     host: str,
@@ -148,6 +197,13 @@ async def apply_new_experiment_run(
         result["note"] += f" LED profile started: {led_profile}."
 
     if dashboard_url:
+        was_already_running = await ensure_dashboard_running(dashboard_url)
         result["dashboard_url"] = dashboard_url
-        result["note"] += f" Watch it live at {dashboard_url} (Live view)."
+        if was_already_running:
+            result["note"] += f" Watch it live at {dashboard_url} (Live view)."
+        else:
+            result["note"] += (
+                f" Starting the dashboard now at {dashboard_url} (Live view) -- give it a few seconds "
+                "to finish loading before the link works."
+            )
     return result
