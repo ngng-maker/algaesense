@@ -6,8 +6,22 @@ Usage: .venv/Scripts/python.exe packages/jaxsr-calibration/benchmarks/run_all.py
 
 from __future__ import annotations
 
+import sys
 import warnings
 from pathlib import Path
+
+"""
+This benchmark's own modules (ground_truth, doe_methods, calibration_recovery,
+doe_comparison, dynamics_recovery) import each other with plain, flat imports
+(e.g. `from ground_truth import ...`), which only resolve if this directory
+is on sys.path -- true automatically when Python is invoked as
+`python path/to/run_all.py` (it inserts the script's own directory as
+sys.path[0]), but not guaranteed under every IDE/launcher/working directory.
+Inserting it explicitly makes this script runnable from anywhere, not just
+lucky invocation styles.
+"""
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import matplotlib
 

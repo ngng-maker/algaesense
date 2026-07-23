@@ -27,9 +27,17 @@ against the real function's own output to confirm the two stay in sync.
 from __future__ import annotations
 
 import shutil
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+"""
+Makes this file's own sibling import below (ground_truth) resolve regardless
+of how this script is invoked -- see the identical note in run_all.py.
+"""
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import jaxsr
 import numpy as np

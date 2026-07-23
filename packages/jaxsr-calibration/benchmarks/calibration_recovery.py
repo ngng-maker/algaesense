@@ -15,9 +15,17 @@ ground truth, for both a "raw" and a "corrected" processing path.
 
 from __future__ import annotations
 
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+"""
+Makes this file's own sibling import below (ground_truth) resolve regardless
+of how this script is invoked -- see the identical note in run_all.py.
+"""
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import numpy as np
 import polars as pl
