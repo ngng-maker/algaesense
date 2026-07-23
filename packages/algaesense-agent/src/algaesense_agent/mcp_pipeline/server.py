@@ -50,9 +50,11 @@ def _wiki_root() -> Path:
     return Path(os.environ.get("ALGAESENSE_LABWIKI_ROOT", "data/labwiki"))
 
 
-def _convert_bound_overrides(raw: dict[str, list[float]] | None) -> dict[str, tuple[float, float]] | None:
+def _convert_bounds_dict(raw: dict[str, list[float]] | None) -> dict[str, tuple[float, float]] | None:
     """MCP tool arguments are plain JSON -- a `[lo, hi]` list, not a
-    Python tuple -- converted here once rather than at every call site."""
+    Python tuple -- converted here once rather than at every call site.
+    Used for both `search_bounds` and `bound_overrides`, since both have
+    the identical `{feature_name: [lo, hi]}` JSON shape."""
     if raw is None:
         return None
     return {name: (float(bounds[0]), float(bounds[1])) for name, bounds in raw.items()}
@@ -85,16 +87,32 @@ def suggest_next_experiment_conditions(
     n_points: int = 3,
     kappa: float = 2.0,
     max_terms: int = 5,
+    search_bounds: dict[str, list[float]] | None = None,
     bound_overrides: dict[str, list[float]] | None = None,
 ) -> dict:
     """Suggest the next experimental conditions to run for a campaign,
-    using active learning over the current fit. `bound_overrides` (e.g.
-    `{"par_umol_m2_s": [0.0, 300.0]}`) narrows the range JAXSR actually
-    searches within for named features -- only narrows the observed
-    data range, never widens past it. Use this when a genuine finding
-    (from labwiki, or from your own reasoning over the fit/data) implies
-    a real constraint on where the next experiment should land; don't
-    use it just to nudge the suggestion toward a value you'd prefer."""
+    using active learning over the current fit.
+
+    By default, the range searched is always the OBSERVED data's own
+    min/max for each feature -- meaning a campaign with only a few
+    clustered experiments so far can never be suggested a point outside
+    that narrow range, no matter how many rounds run. `search_bounds`
+    (e.g. `{"par_umol_m2_s": [0.0, 500.0]}`) fixes that: it REPLACES the
+    default range for named features with one you declare -- use this
+    once, early in a campaign, whenever you know the true physical/safety
+    range to search (e.g. the reactor's configured max-PAR ceiling) but
+    the campaign's own observed data doesn't span it yet. Unlike
+    `bound_overrides` below, this CAN widen past the observed data.
+
+    `bound_overrides` (e.g. `{"par_umol_m2_s": [0.0, 300.0]}`) narrows
+    whichever range results (search_bounds if given, else the observed
+    data range) for named features -- only narrows, never widens. Use
+    this when a genuine finding (from labwiki, or from your own
+    reasoning over the fit/data) implies a real constraint on where the
+    next experiment should land; don't use it just to nudge the
+    suggestion toward a value you'd prefer. The two can be combined:
+    search_bounds sets the starting range, bound_overrides narrows it
+    further."""
     result = suggest_next_experiments(
         campaign_id,
         data_dir=_data_dir(),
@@ -103,7 +121,8 @@ def suggest_next_experiment_conditions(
         n_points=n_points,
         kappa=kappa,
         max_terms=max_terms,
-        bound_overrides=_convert_bound_overrides(bound_overrides),
+        search_bounds=_convert_bounds_dict(search_bounds),
+        bound_overrides=_convert_bounds_dict(bound_overrides),
     )
     return {
         "points": result.points,
@@ -123,6 +142,7 @@ def suggest_next_experiment_conditions_with_context(
     kappa: float = 2.0,
     max_terms: int = 5,
     extra_topics: list[str] | None = None,
+    search_bounds: dict[str, list[float]] | None = None,
     bound_overrides: dict[str, list[float]] | None = None,
 ) -> dict:
     """Same as suggest_next_experiment_conditions, plus relevant labwiki
@@ -135,6 +155,13 @@ def suggest_next_experiment_conditions_with_context(
     with the operator, since it gives them the fuller picture in one
     response; the plain version is still fine for a quick numeric-only
     check.
+
+    `search_bounds` (e.g. `{"par_umol_m2_s": [0.0, 500.0]}`) replaces the
+    default observed-data-derived range for named features, letting the
+    active learner explore beyond whatever's been tried so far -- see
+    `suggest_next_experiment_conditions`'s own docstring for when to use
+    it (a campaign seeded with only a few clustered experiments so far,
+    but where you know the true physical/safety range to search).
 
     Recommended two-step workflow when you actually want labwiki findings
     to change the suggestion, not just sit alongside it: (1) call this
@@ -156,7 +183,8 @@ def suggest_next_experiment_conditions_with_context(
         kappa=kappa,
         max_terms=max_terms,
         extra_topics=extra_topics,
-        bound_overrides=_convert_bound_overrides(bound_overrides),
+        search_bounds=_convert_bounds_dict(search_bounds),
+        bound_overrides=_convert_bounds_dict(bound_overrides),
     )
     return {
         "suggestion": {
@@ -188,6 +216,7 @@ def discover_led_response_dynamics(
     since: str | None = None,
     until: str | None = None,
     max_terms: int = 5,
+    ambient_baseline_run_id: str | None = None,
 ) -> dict:
     """Discover how a reactor's VOC output dynamically responds to its
     LED's actual light history over one experiment -- meant to be run over
@@ -195,7 +224,12 @@ def discover_led_response_dynamics(
     PAR genuinely varies within the run (a static setpoint gives it no
     within-run trend to discover). `since`/`until` are optional ISO
     datetime strings to scope to part of the experiment; omit both to use
-    the whole thing."""
+    the whole thing. `ambient_baseline_run_id` (optional): the id from a
+    prior `run_ambient_baseline_check(..., persist_run_id=...)` call --
+    applies that sensor's ambient-covariate correction before calibration,
+    which a synthetic benchmark with known ground truth confirmed
+    meaningfully improves recovery. Prefer supplying this whenever an
+    ambient-baseline check has already been run for this sensor."""
     result = _discover_led_response_dynamics(
         experiment_id,
         reactor_id,
@@ -205,6 +239,7 @@ def discover_led_response_dynamics(
         since=dt.datetime.fromisoformat(since) if since is not None else None,
         until=dt.datetime.fromisoformat(until) if until is not None else None,
         max_terms=max_terms,
+        ambient_baseline_run_id=ambient_baseline_run_id,
     )
     return asdict(result)
 

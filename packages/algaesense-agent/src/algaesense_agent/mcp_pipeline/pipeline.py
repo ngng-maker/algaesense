@@ -13,6 +13,7 @@ import numpy as np
 import polars as pl
 
 from jaxsr_calibration.calibration.apply import apply_calibration
+from jaxsr_calibration.processing.covariate import apply_covariate_correction, load_covariate_models
 from jaxsr_calibration.processing.features import load_features_for_jaxsr, load_timeseries_for_jaxsr
 
 from algaesense_agent.labwiki.wiki import query_labwiki
@@ -145,12 +146,64 @@ class SuggestionResult:
     search_bounds: list[tuple[float, float]]
     """
     The bounds actually searched -- equal to `fit.feature_bounds` (the
-    full observed data range) unless `bound_overrides` narrowed some of
-    them. Reported separately from `fit.feature_bounds` so a caller can
-    always see both "what the data covers" and "what was actually
-    searched this time", rather than one silently standing in for the
-    other.
+    full observed data range) unless a `search_bounds` argument replaced
+    the base range for some features and/or `bound_overrides` narrowed
+    some of them further. Reported separately from `fit.feature_bounds`
+    so a caller can always see both "what the data covers" and "what was
+    actually searched this time", rather than one silently standing in
+    for the other.
     """
+
+
+def _resolve_search_bounds(
+    feature_names: list[str],
+    feature_bounds: list[tuple[float, float]],
+    search_bounds: dict[str, tuple[float, float]] | None,
+) -> list[tuple[float, float]]:
+    """Replace the observed-data-derived default range for any named
+    feature with a caller-declared one -- unlike `_apply_bound_overrides`,
+    this CAN widen past the observed data, deliberately: it exists
+    specifically for a caller (a human, or Hermes acting on a human's
+    stated fact) who knows the true physical domain to search -- e.g. a
+    reactor's configured PAR safety ceiling -- even when only a few,
+    narrowly-clustered experiments have been run so far.
+
+    Confirmed real, concrete need for this: `suggest_next_experiments`'s
+    bounds otherwise default to `fit.feature_bounds` (the observed data's
+    own min/max), and `bound_overrides` can only narrow that range, never
+    widen it -- so a campaign seeded with only 2-3 clustered points was
+    permanently confined to that narrow range forever after, with no way
+    to ask the active learner to explore the rest of the real domain
+    (confirmed directly in a synthetic benchmark: 2026-07-22's dev log
+    entry). This is the fix: an explicit, typed, opt-in way to say "search
+    this range" that doesn't depend on what's been tried so far.
+
+    Widening past the observed range is a genuine statistical-validity
+    tradeoff (the underlying fit was never validated outside the data it
+    was trained on) -- but it's the CALLER's deliberate, explicit choice
+    to accept that tradeoff, not something this function does on its own
+    initiative, and every setpoint still gets independently re-validated
+    against the reactor's hard safety bounds when it's actually applied,
+    regardless of what JAXSR searched over."""
+    if not search_bounds:
+        return feature_bounds
+
+    unknown = set(search_bounds) - set(feature_names)
+    if unknown:
+        raise ValueError(
+            f"search_bounds mentions unknown feature(s) {sorted(unknown)}; this fit's features are {feature_names}"
+        )
+
+    resolved = []
+    for name, (lo, hi) in zip(feature_names, feature_bounds):
+        if name not in search_bounds:
+            resolved.append((lo, hi))
+            continue
+        new_lo, new_hi = search_bounds[name]
+        if new_lo > new_hi:
+            raise ValueError(f"search_bounds for {name!r} has lo > hi: ({new_lo}, {new_hi})")
+        resolved.append((float(new_lo), float(new_hi)))
+    return resolved
 
 
 def _apply_bound_overrides(
@@ -200,18 +253,31 @@ def suggest_next_experiments(
     n_points: int = 3,
     kappa: float = 2.0,
     max_terms: int = 5,
+    search_bounds: dict[str, tuple[float, float]] | None = None,
     bound_overrides: dict[str, tuple[float, float]] | None = None,
 ) -> SuggestionResult:
     """Fit a model over one campaign, then suggest the next `n_points`
     experimental conditions to try.
+
+    `search_bounds` (e.g. `{"par_umol_m2_s": (0.0, 500.0)}`) REPLACES the
+    default observed-data-derived range for named features -- the one
+    way to make the active learner explore beyond whatever's already
+    been tried, e.g. a reactor's true physical/safety range declared up
+    front. Without it, the default range is always `fit.feature_bounds`
+    (the observed data's own min/max), meaning a campaign seeded with
+    only a few clustered experiments can never be suggested a point
+    outside that narrow range -- see `_resolve_search_bounds`'s
+    docstring for the concrete case this was built to fix.
 
     `bound_overrides` (e.g. `{"par_umol_m2_s": (0.0, 300.0)}`) narrows
     the range JAXSR actually searches within, for named features --
     this is how a genuine scientific insight (a documented problem
     above some value, a known-bad range) can actually change what gets
     suggested, rather than just being displayed alongside it unchanged.
-    Only narrows the observed data range, never widens past it -- see
-    `_apply_bound_overrides`."""
+    Only narrows whatever base range results (search_bounds if given,
+    else the observed data range), never widens past it -- see
+    `_apply_bound_overrides`. Both can be given together: search_bounds
+    sets the starting range, bound_overrides narrows it further."""
 
     """
     `include_categorical=False` here specifically: active learning needs a
@@ -240,11 +306,12 @@ def suggest_next_experiments(
     model = jaxsr.SymbolicRegressor(basis_library=library, max_terms=max_terms)
     model.fit(X, y)
 
-    search_bounds = _apply_bound_overrides(fit.feature_names, fit.feature_bounds, bound_overrides)
+    base_bounds = _resolve_search_bounds(fit.feature_names, fit.feature_bounds, search_bounds)
+    resolved_search_bounds = _apply_bound_overrides(fit.feature_names, base_bounds, bound_overrides)
 
     learner = jaxsr.ActiveLearner(
         model=model,
-        bounds=search_bounds,
+        bounds=resolved_search_bounds,
         acquisition=jaxsr.UCB(kappa=kappa),
     )
     result = learner.suggest(n_points=n_points)
@@ -267,7 +334,7 @@ def suggest_next_experiments(
         scores=[float(s) for s in result.scores],
         acquisition=result.acquisition,
         fit=fit,
-        search_bounds=search_bounds,
+        search_bounds=resolved_search_bounds,
     )
 
 
@@ -316,6 +383,7 @@ def suggest_next_experiments_with_context(
     kappa: float = 2.0,
     max_terms: int = 5,
     extra_topics: list[str] | None = None,
+    search_bounds: dict[str, tuple[float, float]] | None = None,
     bound_overrides: dict[str, tuple[float, float]] | None = None,
 ) -> SuggestionWithContext:
     """`suggest_next_experiments`, plus a labwiki lookup for each
@@ -338,7 +406,10 @@ def suggest_next_experiments_with_context(
     baseline suggestion plus the labwiki context, read/reason over both,
     then call it again *with* `bound_overrides` if something in the
     labwiki findings warrants narrowing the search -- comparing both
-    results rather than only ever seeing the adjusted one.
+    results rather than only ever seeing the adjusted one. `search_bounds`
+    passes straight through too, for the separate case of widening the
+    search past the observed data range -- see `suggest_next_experiments`'s
+    docstring and `_resolve_search_bounds`.
     """
     suggestion = suggest_next_experiments(
         campaign_id,
@@ -348,6 +419,7 @@ def suggest_next_experiments_with_context(
         n_points=n_points,
         kappa=kappa,
         max_terms=max_terms,
+        search_bounds=search_bounds,
         bound_overrides=bound_overrides,
     )
 
@@ -414,11 +486,22 @@ def discover_led_response_dynamics(
     until: dt.datetime | None = None,
     max_terms: int = 5,
     derivative_method: str = "finite_difference",
+    ambient_baseline_run_id: str | None = None,
 ) -> DynamicsDiscoveryResult:
     """Feed one experiment's real, per-second VOC trajectory -- with the
     LED's actually-applied PAR as a second state variable -- into
     `jaxsr.discover_dynamics`, to find how light dynamically drives the
-    VOC response, not just its static level."""
+    VOC response, not just its static level.
+
+    `ambient_baseline_run_id` (optional): if given, applies that
+    persisted ambient-covariate correction (from a prior
+    `run_ambient_baseline_check(..., persist_run_id=...)` call) to the
+    raw voltage before calibration -- confirmed, in a synthetic
+    benchmark with a known ground truth, to meaningfully and
+    consistently improve dynamics recovery (R^2 against the true
+    derivative law rose from ~0.59 to ~0.79 across every repeat tested).
+    Omitted by default (`None`) for backward compatibility: without it,
+    calibration is applied to raw voltage exactly as before."""
 
     """
     Meant to be run over data collected during a control-profile run (a
@@ -498,6 +581,23 @@ def discover_led_response_dynamics(
         )
 
     """
+    Applying the persisted ambient-covariate correction (if given) BEFORE
+    calibration, not after -- the correction subtracts a predicted
+    RH/T-driven baseline from raw millivolts, which is the same space
+    `apply_calibration`'s own `b0`/`b1` inversion expects to operate in.
+    Confirmed real (see this function's docstring): a synthetic
+    benchmark with known ground truth showed this ordering meaningfully
+    and consistently improves dynamics recovery.
+    """
+    voltage = readings["pid_voltage_mv"]
+    if ambient_baseline_run_id is not None:
+        covariate_models = load_covariate_models(
+            ambient_baseline_run_id, data_dir / "derived" / "diagnostics" / "ambient_baseline"
+        )
+        corrected = apply_covariate_correction(readings, covariate_models)
+        voltage = corrected["pid_voltage_mv_covariate_corrected"]
+
+    """
     `apply_calibration`'s `data_dir` is the exact directory holding
     `{calibration_run_id}.parquet`/`.yaml`, not the top-level data_dir --
     matching the one convention already established for this
@@ -505,7 +605,7 @@ def discover_led_response_dynamics(
     """
     calibration_dir = data_dir / "derived" / "calibrations" / "standard_addition"
     ppm, ppm_stderr, _ = apply_calibration(
-        readings["pid_voltage_mv"],
+        voltage,
         sensor_id,
         readings["sample_t_c"],
         readings["sample_rh_pct"],

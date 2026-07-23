@@ -6,11 +6,13 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 import polars as pl
 import statsmodels.api as sm
+import yaml
 
 from jaxsr_calibration.processing.errors import TrainingWindowInsufficientError
 from jaxsr_calibration.validation import require_columns, require_implemented_method
@@ -283,3 +285,89 @@ def apply_covariate_correction(df: pl.DataFrame, models: dict[str, CovariateMode
         )
 
     return pl.concat(corrected_frames)
+
+
+def persist_covariate_models(
+    models: dict[str, CovariateModel],
+    ambient_baseline_run_id: str,
+    out_dir: Path,
+) -> Path:
+    """Save every sensor's fitted ambient-covariate model to disk, so a
+    later caller (e.g. discover_led_response_dynamics) can apply the same
+    correction without needing to re-fit it from a fresh blank/ambient
+    recording every time."""
+
+    """
+    Only `alpha`/`beta_rh`/`gamma_t`/`delta_rh_t`/`method`/`r_squared`/
+    `training_window` are written -- `covariance` (a numpy array) and
+    `symbolic_regressor` (a live, unpicklable jaxsr object) aren't
+    JSON/YAML-safe, and `apply_covariate_correction` doesn't need either
+    of them to actually apply a correction. Mirrors
+    `calibration/apply.py`'s persist_calibration/load_calibration split
+    and its atomic write-to-temp-then-replace pattern.
+    """
+    if not models:
+        raise ValueError("persist_covariate_models: models is empty, nothing to write")
+
+    unsupported = [m.sensor_id for m in models.values() if m.method not in ("ols", "robust")]
+    if unsupported:
+        raise ValueError(
+            f"persist_covariate_models: sensor(s) {sorted(unsupported)} use a 'symbolic' "
+            "model -- only 'ols'/'robust' models (real alpha/beta_rh/gamma_t/delta_rh_t "
+            "coefficients, not a live SymbolicRegressor) can be persisted here"
+        )
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    rows = [
+        {
+            "sensor_id": model.sensor_id,
+            "method": model.method,
+            "alpha": model.alpha,
+            "beta_rh": model.beta_rh,
+            "gamma_t": model.gamma_t,
+            "delta_rh_t": model.delta_rh_t,
+            "r_squared": model.r_squared,
+            "training_window_start": model.training_window[0].isoformat(),
+            "training_window_end": model.training_window[1].isoformat(),
+        }
+        for model in models.values()
+    ]
+
+    yaml_path = out_dir / f"{ambient_baseline_run_id}.yaml"
+    tmp_yaml_path = out_dir / f".{ambient_baseline_run_id}.yaml.tmp"
+    tmp_yaml_path.write_text(yaml.safe_dump({"models": rows}, sort_keys=False), encoding="utf-8")
+    tmp_yaml_path.replace(yaml_path)
+    return yaml_path
+
+
+def load_covariate_models(ambient_baseline_run_id: str, data_dir: Path) -> dict[str, CovariateModel]:
+    """Load a previously-persisted ambient-covariate correction run back
+    from disk -- the reverse of persist_covariate_models. `covariance`
+    and `symbolic_regressor` come back `None` (never persisted; not
+    needed by apply_covariate_correction)."""
+    yaml_path = Path(data_dir) / f"{ambient_baseline_run_id}.yaml"
+    if not yaml_path.exists():
+        raise FileNotFoundError(f"No ambient-covariate YAML file at {yaml_path}")
+
+    with yaml_path.open("r", encoding="utf-8") as f:
+        sidecar = yaml.safe_load(f)
+
+    models: dict[str, CovariateModel] = {}
+    for row in sidecar["models"]:
+        models[row["sensor_id"]] = CovariateModel(
+            sensor_id=row["sensor_id"],
+            method=row["method"],
+            alpha=row["alpha"],
+            beta_rh=row["beta_rh"],
+            gamma_t=row["gamma_t"],
+            delta_rh_t=row["delta_rh_t"],
+            covariance=None,
+            symbolic_regressor=None,
+            training_window=(
+                dt.datetime.fromisoformat(row["training_window_start"]),
+                dt.datetime.fromisoformat(row["training_window_end"]),
+            ),
+            r_squared=row["r_squared"],
+        )
+    return models

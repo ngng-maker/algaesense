@@ -177,6 +177,75 @@ def test_bound_overrides_rejects_a_range_with_no_overlap_at_all(tmp_path: Path) 
         )
 
 
+def test_search_bounds_widens_past_the_observed_data_range(tmp_path: Path) -> None:
+    """The fix for the architectural finding: a campaign confined to a
+    narrow observed range must still be able to explore a caller-declared
+    WIDER physical domain -- something bound_overrides structurally
+    cannot do (it only narrows)."""
+    _write_synthetic_campaign(tmp_path, "camp_01")  # observed par range is ~100-500
+
+    result = suggest_next_experiments(
+        "camp_01",
+        data_dir=tmp_path,
+        target="mean_voc_ppm_asgas",
+        feature_columns=["par_umol_m2_s"],
+        n_points=5,
+        search_bounds={"par_umol_m2_s": (0.0, 1000.0)},
+    )
+
+    assert result.search_bounds == [(0.0, 1000.0)]
+    # At least one suggested point should land outside the originally-observed
+    # ~100-500 range -- otherwise the widened bound had no real effect.
+    assert any(point["par_umol_m2_s"] > 500.0 or point["par_umol_m2_s"] < 100.0 for point in result.points)
+
+
+def test_search_bounds_and_bound_overrides_combine_search_bounds_first(tmp_path: Path) -> None:
+    """search_bounds sets the starting range; bound_overrides narrows
+    whatever range results, even if that starting range was itself
+    wider than the observed data."""
+    _write_synthetic_campaign(tmp_path, "camp_01")  # observed par range is ~100-500
+
+    result = suggest_next_experiments(
+        "camp_01",
+        data_dir=tmp_path,
+        target="mean_voc_ppm_asgas",
+        feature_columns=["par_umol_m2_s"],
+        n_points=3,
+        search_bounds={"par_umol_m2_s": (0.0, 1000.0)},
+        bound_overrides={"par_umol_m2_s": (0.0, 50.0)},
+    )
+
+    assert result.search_bounds == [(0.0, 50.0)]
+    for point in result.points:
+        assert 0.0 <= point["par_umol_m2_s"] <= 50.0
+
+
+def test_search_bounds_rejects_an_unknown_feature_name(tmp_path: Path) -> None:
+    _write_synthetic_campaign(tmp_path, "camp_01")
+
+    with pytest.raises(ValueError, match="unknown feature"):
+        suggest_next_experiments(
+            "camp_01",
+            data_dir=tmp_path,
+            target="mean_voc_ppm_asgas",
+            feature_columns=["par_umol_m2_s"],
+            search_bounds={"not_a_real_feature": (0.0, 1.0)},
+        )
+
+
+def test_search_bounds_rejects_lo_greater_than_hi(tmp_path: Path) -> None:
+    _write_synthetic_campaign(tmp_path, "camp_01")
+
+    with pytest.raises(ValueError, match="lo > hi"):
+        suggest_next_experiments(
+            "camp_01",
+            data_dir=tmp_path,
+            target="mean_voc_ppm_asgas",
+            feature_columns=["par_umol_m2_s"],
+            search_bounds={"par_umol_m2_s": (500.0, 100.0)},
+        )
+
+
 def test_suggest_next_experiments_with_context_surfaces_matching_labwiki_pages(tmp_path: Path) -> None:
     """Combines the same synthetic numeric campaign this file already
     uses for suggest_next_experiments with a real, separately-ingested
@@ -534,6 +603,67 @@ def test_discover_led_response_dynamics_raises_for_naive_since_or_until(tmp_path
     with pytest.raises(ValueError, match="timezone-aware"):
         discover_led_response_dynamics(
             "exp_dynamics_test", "R01", "PID01", "cal_dynamics_test", data_dir=tmp_path, until=naive_since
+        )
+
+
+def test_discover_led_response_dynamics_applies_a_persisted_ambient_baseline_correction(tmp_path: Path) -> None:
+    """The fix for a real gap Test 3 of the synthetic benchmark surfaced:
+    discover_led_response_dynamics previously had no way to apply an
+    ambient-baseline covariate correction before calibration. Confirms
+    the wiring works end to end (persist a real CovariateModel, pass its
+    run id through) without needing to prove the accuracy improvement
+    again here -- that's already validated by the benchmark's Test 3.
+    `_write_dynamics_experiment`'s rows use constant sample_t_c/sample_rh_pct,
+    so the correction is a constant shift with no effect on the discovered
+    RATE (a derivative is invariant to an additive constant) -- this test
+    is purely about the plumbing not breaking anything, not about
+    re-deriving the accuracy result."""
+    from jaxsr_calibration.processing.covariate import CovariateModel, persist_covariate_models
+
+    _write_dynamics_experiment(tmp_path, "exp_dynamics_test")
+    _persist_known_calibration(tmp_path, "cal_dynamics_test")
+
+    covariate_model = CovariateModel(
+        sensor_id="PID01",
+        method="ols",
+        alpha=0.0,
+        beta_rh=0.01,
+        gamma_t=0.01,
+        delta_rh_t=0.0,
+        covariance=None,
+        symbolic_regressor=None,
+        training_window=(_DYN_START, _DYN_START + dt.timedelta(hours=1)),
+        r_squared=0.9,
+    )
+    persist_covariate_models(
+        {"PID01": covariate_model}, "ambient_test_run", tmp_path / "derived" / "diagnostics" / "ambient_baseline"
+    )
+
+    result = discover_led_response_dynamics(
+        "exp_dynamics_test",
+        "R01",
+        "PID01",
+        "cal_dynamics_test",
+        data_dir=tmp_path,
+        max_terms=3,
+        ambient_baseline_run_id="ambient_test_run",
+    )
+
+    assert "reactor_par_umol_m2_s" in result.selected_features["ppm_asgas"]
+
+
+def test_discover_led_response_dynamics_raises_clearly_for_an_unknown_ambient_baseline_run_id(tmp_path: Path) -> None:
+    _write_dynamics_experiment(tmp_path, "exp_dynamics_test")
+    _persist_known_calibration(tmp_path, "cal_dynamics_test")
+
+    with pytest.raises(FileNotFoundError, match="ambient-covariate"):
+        discover_led_response_dynamics(
+            "exp_dynamics_test",
+            "R01",
+            "PID01",
+            "cal_dynamics_test",
+            data_dir=tmp_path,
+            ambient_baseline_run_id="does_not_exist",
         )
 
 

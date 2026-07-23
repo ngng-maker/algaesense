@@ -11,14 +11,17 @@ time dynamics: dVOC/dt = (1/tau) * (true_voc_ppm(par(t), temp) - VOC(t))
 -- see ground_truth.py's dynamic-ground-truth section for why this is
 tied to the same static surface as its steady-state target.
 
-Runs both the REAL top-level `discover_led_response_dynamics` (for a
-genuine end-to-end proof the real tool works, exactly as production
-code exposes it -- which applies calibration to raw voltage only, no
-ambient-baseline correction) AND a parallel internal-pieces variant that
-adds ambient-baseline covariate correction before calibration, so the
-two can be compared the same way Test 1 compared raw vs. corrected --
-this doubles as a real test of whether discover_led_response_dynamics
-would benefit from a correction step it doesn't currently apply.
+Runs the REAL, public `discover_led_response_dynamics` for BOTH the raw
+path (no `ambient_baseline_run_id`) and the ambient-corrected path
+(passing a real, persisted `ambient_baseline_run_id`) -- this parameter
+was added directly to the production tool after this benchmark first
+confirmed the correction helps (see CLAUDE.md's dev log). A parallel
+internal-pieces variant (same load_timeseries_for_jaxsr ->
+jaxsr.discover_dynamics calls the public function makes internally) is
+still used for SCORING only, since the public function's
+DynamicsDiscoveryResult deliberately strips the live model objects a
+dense-grid RMSE/R^2 comparison needs -- its equation is cross-checked
+against the real function's own output to confirm the two stay in sync.
 """
 
 from __future__ import annotations
@@ -49,7 +52,11 @@ from algaesense_agent.mcp_pipeline.pipeline import discover_led_response_dynamic
 from algaesense_agent.raw_readers import load_raw_voc_readings
 from jaxsr_calibration.calibration.apply import apply_calibration, persist_calibration
 from jaxsr_calibration.calibration.standard_addition import fit_sensitivity_per_sensor
-from jaxsr_calibration.processing.covariate import apply_covariate_correction, fit_covariate_model
+from jaxsr_calibration.processing.covariate import (
+    apply_covariate_correction,
+    fit_covariate_model,
+    persist_covariate_models,
+)
 from jaxsr_calibration.processing.features import load_timeseries_for_jaxsr
 
 
@@ -57,6 +64,7 @@ EXPERIMENT_ID = "exp_dynamics_bench"
 REACTOR_ID = "R01"
 SENSOR_ID = "PID01"
 CALIBRATION_RUN_ID = "benchmark_dynamics_cal_01"
+AMBIENT_BASELINE_RUN_ID = "benchmark_dynamics_ambient_01"
 TRUE_CALIBRATION = SensorCalibrationTruth(b0_mv=20.0, b1_mv_per_ppm=0.60)
 TEMP = 30.0
 DURATION_S = 1800  # 3 full periods of the profile below
@@ -140,6 +148,11 @@ def run_dynamics_recovery_test(seed: int = 0, verbose: bool = True) -> DynamicsR
         ambient_truth = AmbientCovariateTruth()
         ambient_df = generate_ambient_blank_recording([SENSOR_ID], ambient_truth, seed=seed + 1)
         covariate_model = fit_covariate_model(ambient_df, pl.Series([True] * ambient_df.height), method="ols")
+        persist_covariate_models(
+            {SENSOR_ID: covariate_model},
+            AMBIENT_BASELINE_RUN_ID,
+            data_dir / "derived" / "diagnostics" / "ambient_baseline",
+        )
 
         def par_fn(elapsed_s: float) -> float:
             from algaesense_edge.actuators.control_profiles import evaluate_control_profile
@@ -156,27 +169,40 @@ def run_dynamics_recovery_test(seed: int = 0, verbose: bool = True) -> DynamicsR
 
         """
         Step 1 -- prove the REAL, public discover_led_response_dynamics
-        works end to end, exactly as production code exposes it: write
-        the raw Parquet layout it actually reads from and call it
-        directly, no internal shortcuts.
+        works end to end, exactly as production code exposes it, for
+        BOTH the raw path and the ambient-corrected path (now a real,
+        supported parameter -- see CLAUDE.md's dev log): write the raw
+        Parquet layout it actually reads from and call it directly, no
+        internal shortcuts.
         """
         raw_dir = data_dir / "raw" / "experiments" / EXPERIMENT_ID / f"sensor_id={SENSOR_ID}"
         raw_dir.mkdir(parents=True)
         readings.write_parquet(raw_dir / "hour=0.parquet")
 
-        real_result = discover_led_response_dynamics(
+        real_raw_result = discover_led_response_dynamics(
             EXPERIMENT_ID, REACTOR_ID, SENSOR_ID, CALIBRATION_RUN_ID, data_dir=data_dir, max_terms=5
         )
+        real_corrected_result = discover_led_response_dynamics(
+            EXPERIMENT_ID, REACTOR_ID, SENSOR_ID, CALIBRATION_RUN_ID, data_dir=data_dir, max_terms=5,
+            ambient_baseline_run_id=AMBIENT_BASELINE_RUN_ID,
+        )
         if verbose:
-            print(f"  [real discover_led_response_dynamics] equation: {real_result.equations.get('ppm_asgas')}")
-            print(f"  [real discover_led_response_dynamics] selected_features: {real_result.selected_features.get('ppm_asgas')}")
+            print(f"  [real discover_led_response_dynamics, raw] equation: {real_raw_result.equations.get('ppm_asgas')}")
+            print(f"  [real discover_led_response_dynamics, ambient_baseline_run_id set] equation: {real_corrected_result.equations.get('ppm_asgas')}")
 
         """
-        Step 2 -- score BOTH raw and ambient-corrected variants against
-        the true derivative law on a dense held-out grid, using the same
-        underlying pieces the real function calls (just with the live
-        model kept around, unlike the public function's JSON-safe
-        return type).
+        Step 2 -- score BOTH paths against the true derivative law on a
+        dense held-out grid, using the same underlying pieces the real
+        function calls (just with the live model kept around, unlike the
+        public function's JSON-safe return type). NOT asserted to match
+        the real calls above byte-for-byte -- jaxsr.SymbolicRegressor.fit()
+        is independently non-deterministic even given identical input
+        data (see Test 2's own finding), so two separate fit() calls on
+        the same X/t can legitimately land on different equations. Both
+        code paths (real function, internal-pieces scoring variant) are
+        still the exact same load_timeseries_for_jaxsr ->
+        jaxsr.discover_dynamics sequence -- only which of jaxsr's own
+        non-deterministic fit outcomes gets drawn can differ.
         """
         real_readings = load_raw_voc_readings(data_dir, EXPERIMENT_ID).filter(
             (pl.col("reactor_id") == REACTOR_ID) & (pl.col("sensor_id") == SENSOR_ID)
@@ -196,11 +222,12 @@ def run_dynamics_recovery_test(seed: int = 0, verbose: bool = True) -> DynamicsR
         )
         corrected_readings = real_readings.with_columns(corrected_ppm.alias("ppm_asgas"))
         corrected_result, corrected_state_names = _discover_dynamics_from_readings(corrected_readings)
+        assert corrected_result.equations.get("ppm_asgas") == real_corrected_result.equations.get("ppm_asgas")
 
         results = {}
         for label, result, state_names in [
-            ("raw (matches real discover_led_response_dynamics)", raw_result, raw_state_names),
-            ("ambient-corrected (not yet done by the real tool)", corrected_result, corrected_state_names),
+            ("raw (discover_led_response_dynamics, ambient_baseline_run_id omitted)", raw_result, raw_state_names),
+            ("corrected (discover_led_response_dynamics, ambient_baseline_run_id set)", corrected_result, corrected_state_names),
         ]:
             model = result.models["ppm_asgas"]
             rmse, r2 = _score_model(model, state_names)

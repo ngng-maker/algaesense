@@ -10,6 +10,7 @@ import os
 from dataclasses import asdict
 from pathlib import Path
 
+from jaxsr_calibration.processing.covariate import persist_covariate_models
 from mcp.server.fastmcp import FastMCP
 
 from algaesense_agent.mcp_diagnostics.diagnostics import (
@@ -35,10 +36,23 @@ def run_fleet_zero_check(experiment_id: str, duration_min: int = 60) -> dict:
 
 
 @mcp.tool()
-def run_ambient_baseline_check(experiment_id: str, duration_h: int = 12, method: str = "ols") -> dict:
+def run_ambient_baseline_check(
+    experiment_id: str, duration_h: int = 12, method: str = "ols", persist_run_id: str | None = None
+) -> dict:
     """Characterize each sensor's response to room temperature/humidity,
-    from an already-collected ambient-air experiment run."""
+    from an already-collected ambient-air experiment run. Pass
+    `persist_run_id` to save the fitted models to disk under that id --
+    a later `discover_led_response_dynamics` call can then pass the same
+    id as `ambient_baseline_run_id` to apply this same correction before
+    calibration, rather than leaving that correction unapplied."""
     result = ambient_baseline_check(_data_dir(), experiment_id, duration_h, method)
+
+    if persist_run_id is not None:
+        persist_covariate_models(
+            result.covariate_models,
+            persist_run_id,
+            _data_dir() / "derived" / "diagnostics" / "ambient_baseline",
+        )
 
     """
     `CovariateModel.covariance` is a numpy array and `.symbolic_regressor`
@@ -59,7 +73,11 @@ def run_ambient_baseline_check(experiment_id: str, duration_h: int = 12, method:
         }
         for sensor_id, model in result.covariate_models.items()
     }
-    return {"covariate_models": covariate_models, "r_squared_per_sensor": result.r_squared_per_sensor}
+    return {
+        "covariate_models": covariate_models,
+        "r_squared_per_sensor": result.r_squared_per_sensor,
+        "persisted_as": persist_run_id,
+    }
 
 
 @mcp.tool()
