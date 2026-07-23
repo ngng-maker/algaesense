@@ -1,7 +1,25 @@
-"""Test 2 -- does the calibration+JAXSR+labwiki active-learning
-workflow characterize the true VOC(PAR, temp) surface faster than
-classic DoE (Latin Hypercube / Sobol / Grid / Random), given the same
-10-experiment budget?
+"""Test 2 -- two DISTINCT questions about how the calibration+JAXSR+
+labwiki active-learning workflow compares to classic DoE (Latin
+Hypercube / Sobol / Grid / Random), given the same 10-experiment budget:
+
+1. Surface reconstruction (`rmse_by_round`): does the method characterize
+   the ENTIRE true VOC(PAR, temp) surface accurately? This metric
+   structurally favors space-filling designs (DoE) -- a method that
+   samples the whole domain evenly will always score better here than
+   one that doesn't, regardless of how "good" its choices are.
+2. Best-found value (`best_found_by_round`): does the method actually
+   locate GOOD experimental conditions -- the thing active learning's
+   UCB acquisition is actually designed to do, and DoE baselines are not
+   (a space-filling design has no notion of "good" at all; it just
+   covers ground). Reported as a fraction of TRUE_GLOBAL_MAX, the real
+   maximum of true_voc_ppm over the whole domain.
+
+Both matter, and they can disagree -- a method that greedily exploits
+one promising region (a real, observed behavior of the UCB-based active
+learner here, confirmed by literally printing its chosen points and
+seeing them cluster near the true optimum) will score BADLY on (1) and
+WELL on (2), for the same underlying reason. Reporting only one of
+these would misrepresent what the workflow is actually for.
 
 Every method's chosen points get 'measured' through the identical
 noisy-but-calibrated readout (see measure_voc_corrected below, whose
@@ -34,6 +52,7 @@ import numpy as np
 import polars as pl
 
 from doe_methods import (
+    SEED_POINTS,
     grid_points,
     latin_hypercube_points,
     random_points,
@@ -59,6 +78,30 @@ LABWIKI_NOTE_TEXT = (
     "focusing future runs below this threshold rather than continuing to probe higher."
 )
 LABWIKI_BOUND_OVERRIDE = {"par_umol_m2_s": (PAR_BOUNDS[0], PHOTO_THRESHOLD_PAR)}
+
+
+def _compute_true_global_max() -> float:
+    """The real maximum of true_voc_ppm over the whole domain -- what
+    'best_found_by_round' is measured against. A fine grid (not the
+    coarser DENSE_GRID_N used for surface-RMSE scoring) since this one
+    number anchors every best-found-value percentage in the report."""
+    par_grid, temp_grid = np.meshgrid(np.linspace(*PAR_BOUNDS, 400), np.linspace(*TEMP_BOUNDS, 400))
+    return float(np.max(true_voc_ppm(par_grid.ravel(), temp_grid.ravel())))
+
+
+TRUE_GLOBAL_MAX = _compute_true_global_max()
+
+"""
+Every method shares the SAME 4 seed points (see doe_methods.SEED_POINTS),
+and one of those corners already happens to sit fairly close to the true
+optimum -- confirmed directly: across many repeats, several non-adaptive
+DoE baselines' own chosen points NEVER beat this seed-only value at all,
+meaning their raw best_found_by_round score is really just measuring
+'did the shared seed get lucky,' not their own point-selection quality.
+SEED_ONLY_BEST isolates that baseline so each method's genuine
+CONTRIBUTION beyond the seed can be reported separately and fairly.
+"""
+SEED_ONLY_BEST = float(max(true_voc_ppm(par, temp) for par, temp in SEED_POINTS))
 
 
 def measure_voc_corrected(par: float, temp: float, rng: np.random.Generator) -> float:
@@ -109,6 +152,20 @@ def _fit_and_score_round(features_df: pl.DataFrame, test_par: np.ndarray, test_t
     return float(np.sqrt(np.mean((predicted - test_true) ** 2)))
 
 
+def _best_found_by_round(points: list[tuple[float, float]]) -> list[float]:
+    """The TRUE (noiseless) VOC value at the best point revealed so far,
+    cumulatively -- 'did this method actually land on good conditions',
+    scored against ground truth rather than the noisy measurement, same
+    as Test 1's parameter-recovery comparisons."""
+    best_so_far = -float("inf")
+    result = []
+    for par, temp in points:
+        true_value = float(true_voc_ppm(par, temp))
+        best_so_far = max(best_so_far, true_value)
+        result.append(best_so_far)
+    return result
+
+
 def _score_all_rounds(points: list[tuple[float, float]], test_par, test_temp, test_true, rng: np.random.Generator) -> list[float]:
     """Re-measure each revealed point's readout fresh for scoring
     (independent noise draw from whatever was used to pick it), then
@@ -142,7 +199,13 @@ def _score_all_rounds(points: list[tuple[float, float]], test_par, test_temp, te
     return rmses
 
 
-def run_doe_comparison(seed: int = 0, verbose: bool = True) -> dict[str, list[float]]:
+@dataclass
+class DoEComparisonResult:
+    rmse_by_round: dict[str, list[float]]
+    best_found_by_round: dict[str, list[float]]
+
+
+def run_doe_comparison(seed: int = 0, verbose: bool = True) -> DoEComparisonResult:
     test_par, test_temp, test_true = _dense_test_grid()
     scoring_rng = np.random.default_rng(seed + 1000)
 
@@ -185,20 +248,29 @@ def run_doe_comparison(seed: int = 0, verbose: bool = True) -> dict[str, list[fl
             if verbose:
                 print(f"  {label}: generated {len(points)} points")
 
-        results: dict[str, list[float]] = {}
+        rmse_by_round: dict[str, list[float]] = {}
+        best_found_by_round: dict[str, list[float]] = {}
         for label, method_run in methods.items():
             rmses = _score_all_rounds(method_run.points, test_par, test_temp, test_true, scoring_rng)
-            results[label] = rmses
+            rmse_by_round[label] = rmses
+            best_found_by_round[label] = _best_found_by_round(method_run.points)
             if verbose:
-                print(f"  {label} RMSE by round: {[round(r, 1) if r == r else None for r in rmses]}")
+                print(f"  {label} surface RMSE by round: {[round(r, 1) if r == r else None for r in rmses]}")
+                print(
+                    f"  {label} best-found VOC by round: "
+                    f"{[round(v, 1) for v in best_found_by_round[label]]} (true max = {TRUE_GLOBAL_MAX:.1f})"
+                )
 
-        return results
+        return DoEComparisonResult(rmse_by_round=rmse_by_round, best_found_by_round=best_found_by_round)
     finally:
         shutil.rmtree(tmp_root, ignore_errors=True)
 
 
 if __name__ == "__main__":
-    results = run_doe_comparison()
-    print("\nFinal (round 10) RMSE vs true surface, lower is better:")
-    for label, rmses in sorted(results.items(), key=lambda kv: kv[1][-1]):
+    result = run_doe_comparison()
+    print(f"\nFinal (round 10) RMSE vs true surface, lower is better (favors space-filling designs):")
+    for label, rmses in sorted(result.rmse_by_round.items(), key=lambda kv: kv[1][-1]):
         print(f"  {label}: {rmses[-1]:.1f} ppm")
+    print(f"\nFinal (round 10) best-found VOC as % of true max ({TRUE_GLOBAL_MAX:.1f} ppm), higher is better:")
+    for label, values in sorted(result.best_found_by_round.items(), key=lambda kv: -kv[1][-1]):
+        print(f"  {label}: {100.0 * values[-1] / TRUE_GLOBAL_MAX:.1f}%")
