@@ -96,6 +96,26 @@ _METHOD_COLORS = {
 }
 
 """
+Distinct marker SHAPES per method, not just color -- all 6 methods share
+the same 4 seed points (rounds 1-4), so their "finding good conditions"
+curves are identical there by construction, and often nearly identical
+for rounds 5-10 too (the shared seed frequently already sits close to
+the true optimum, leaving little room for any method to separate from
+it -- see REPORT.md's seed-adjusted-improvement section). When curves
+coincide, color alone makes 5 of 6 series invisible under whichever one
+was drawn last; a distinct marker shape stays visually identifiable even
+when several lines sit on the exact same pixels.
+"""
+_METHOD_MARKERS = {
+    "Ours (plain)": "o",
+    "Ours + labwiki": "s",
+    "Latin Hypercube": "^",
+    "Sobol": "D",
+    "Grid": "v",
+    "Random": "P",
+}
+
+"""
 Presentation-quality matplotlib defaults: larger type for projection/
 slides, a light recessive grid (never dominant), and no top/right
 spines so the eye lands on the data, not the frame.
@@ -258,43 +278,76 @@ def _plot_calibration_recovery(results: dict, output_path: Path) -> None:
 
 
 def _plot_doe_comparison(rmse_curves: dict[str, np.ndarray], best_found_curves: dict[str, np.ndarray], output_path: Path) -> None:
-    """Two panels, side by side, deliberately -- these two metrics can
-    (and here, do) disagree about which method 'wins', because they
-    measure different things: whole-surface reconstruction accuracy
-    (favors space-filling DoE) vs. whether the method actually located
-    good experimental conditions (what active learning is FOR). Showing
-    only one would misrepresent the comparison."""
-    fig, axes = plt.subplots(1, 2, figsize=(15.5, 6))
+    """Three panels -- (a)/(b) are the two DISTINCT metrics that can (and
+    here, do) disagree about which method 'wins', since they measure
+    different things (whole-surface reconstruction accuracy, which
+    favors space-filling DoE, vs. whether the method actually located
+    good experimental conditions, what active learning is FOR). Panel
+    (c) is a deliberate zoomed-in re-plot of (b)'s rounds 4-10: all 6
+    methods share the SAME 4 seed points, so their (b) curves are
+    IDENTICAL for rounds 1-4 by construction, and often stay within a
+    few percent of each other afterward too (the shared seed frequently
+    already sits close to the true optimum) -- real, not missing, data,
+    but invisible at panel (b)'s necessary 0-100% scale. Panel (c)
+    re-plots the same numbers on an axis zoomed to the actual spread so
+    the real separation between methods is visible."""
+    fig = plt.figure(figsize=(20, 6.5))
+    axes = [fig.add_subplot(1, 3, 1), fig.add_subplot(1, 3, 2), fig.add_subplot(1, 3, 3)]
     rounds = np.arange(1, 11)
 
     for label, curve in rmse_curves.items():
         mean = np.nanmean(curve, axis=0)
         std = np.nanstd(curve, axis=0)
         color = _METHOD_COLORS.get(label, None)
-        axes[0].plot(rounds, mean, label=label, color=color, linewidth=2.4, marker="o", markersize=4)
+        marker = _METHOD_MARKERS.get(label, "o")
+        axes[0].plot(rounds, mean, label=label, color=color, linewidth=2.4, marker=marker, markersize=6)
         axes[0].fill_between(rounds, mean - std, mean + std, color=color, alpha=0.15, linewidth=0)
     axes[0].set_xlabel("Experiment round (cumulative)")
     axes[0].set_ylabel("RMSE vs. true VOC(PAR, temp) surface (ppm)")
-    axes[0].set_title(f"(a) Surface reconstruction\n(favors space-filling designs) — mean ± std, {N_SEEDS} repeats")
+    axes[0].set_title(f"(a) Surface reconstruction\nmean ± std, {N_SEEDS} repeats")
     axes[0].legend(loc="upper right", framealpha=0.95)
     axes[0].set_xticks(rounds)
 
+    pct_means = {}
     for label, curve in best_found_curves.items():
         pct = 100.0 * curve / TRUE_GLOBAL_MAX
         mean = np.mean(pct, axis=0)
         std = np.std(pct, axis=0)
+        pct_means[label] = mean
         color = _METHOD_COLORS.get(label, None)
-        axes[1].plot(rounds, mean, label=label, color=color, linewidth=2.4, marker="o", markersize=4)
+        marker = _METHOD_MARKERS.get(label, "o")
+        axes[1].plot(rounds, mean, label=label, color=color, linewidth=2.4, marker=marker, markersize=6)
         axes[1].fill_between(rounds, mean - std, mean + std, color=color, alpha=0.15, linewidth=0)
     axes[1].axhline(100.0, color=TRUE_COLOR, linestyle="--", linewidth=1.3, alpha=0.7, label="True global maximum")
     axes[1].set_xlabel("Experiment round (cumulative)")
     axes[1].set_ylabel("Best-found VOC (% of true global max)")
-    axes[1].set_title(f"(b) Finding good conditions\n(what active learning is FOR) — mean ± std, {N_SEEDS} repeats")
+    axes[1].set_title(f"(b) Finding good conditions\nmean ± std, {N_SEEDS} repeats")
     axes[1].legend(loc="lower right", framealpha=0.95)
     axes[1].set_xticks(rounds)
 
+    """
+    Panel (c): same data as (b), rounds 4-10 only, y-axis zoomed to the
+    actual data range (computed fresh, never hardcoded) so genuine
+    differences between methods -- often just a few percentage points --
+    are visible instead of looking like a flat overlapping line.
+    """
+    zoom_rounds = rounds[3:]
+    all_zoom_values = np.concatenate([pct_means[label][3:] for label in best_found_curves])
+    zoom_lo, zoom_hi = float(np.min(all_zoom_values)), float(np.max(all_zoom_values))
+    margin = max(0.5, (zoom_hi - zoom_lo) * 0.15)
+    for label in best_found_curves:
+        color = _METHOD_COLORS.get(label, None)
+        marker = _METHOD_MARKERS.get(label, "o")
+        axes[2].plot(zoom_rounds, pct_means[label][3:], label=label, color=color, linewidth=2.4, marker=marker, markersize=7)
+    axes[2].set_ylim(zoom_lo - margin, zoom_hi + margin)
+    axes[2].set_xlabel("Experiment round (cumulative)")
+    axes[2].set_ylabel("Best-found VOC (% of true global max)")
+    axes[2].set_title("(c) Panel (b), zoomed to rounds 4-10")
+    axes[2].legend(loc="best", framealpha=0.95, fontsize=9)
+    axes[2].set_xticks(zoom_rounds)
+
     fig.suptitle("Test 2 — DoE comparison: 10-experiment budget, 6 point-selection strategies")
-    fig.tight_layout(rect=[0, 0, 1, 0.93])
+    fig.tight_layout(rect=[0, 0, 1, 0.93], w_pad=3.0)
     fig.savefig(output_path, dpi=200)
     plt.close(fig)
 
@@ -419,6 +472,98 @@ def _write_report(
         "- **Seed-adjusted improvement** (Test 2): a method's best-found value minus the shared "
         "seed points' own best value alone -- isolates what a method's OWN chosen points "
         "contributed, since a lucky shared starting point can otherwise dominate the raw score."
+    )
+    lines.append("")
+
+    lines.append("## How to read each plot")
+    lines.append("")
+    lines.append(
+        "A plain walkthrough of what's actually on each of the three images in this folder, panel by "
+        "panel, for anyone opening them without already knowing the code behind them."
+    )
+    lines.append("")
+    lines.append("### `calibration_recovery.png` (Test 1) -- 3 panels")
+    lines.append("")
+    lines.append(
+        "- **(a) Recovered VOC accuracy**: two bars, one number each -- how far off (in ppm) the "
+        "recovered VOC value typically is from the true value, using raw sensor voltage (blue) vs. "
+        "using the corrected pipeline (orange). Shorter bar = more accurate. This is the headline "
+        "number: does correction actually help?"
+    )
+    lines.append(
+        "- **(b) True-function parameter recovery**: one pair of bars (blue = raw, orange = "
+        "corrected) per named coefficient in the ground-truth equation (`vmax`, `k_m`, `temp_slope`, "
+        "`gamma`, `photo_k`, `baseline`). Each bar is a % error -- how far the *fitted* coefficient "
+        "landed from its true, known value. A short bar means that specific piece of the underlying "
+        "physics was recovered correctly, not just that predictions looked reasonable overall."
+    )
+    lines.append(
+        "- **(c) Generated data: recovered vs. true**: one dot per synthetic experiment, blue for "
+        "raw-recovered VOC and orange for corrected-recovered VOC, plotted against the true VOC value "
+        "that experiment actually had (x-axis). The dashed diagonal line is 'perfect recovery' -- a "
+        "dot sitting exactly on that line means the recovered value exactly matched the truth. Dots "
+        "far above/below the line are experiments where that pipeline got it wrong. This panel is "
+        "also literally what the raw generated data looks like."
+    )
+    lines.append("")
+    lines.append("### `doe_comparison.png` (Test 2) -- 3 panels")
+    lines.append("")
+    lines.append(
+        "Six colored lines run through all three panels, one per point-selection method (see the "
+        "legend on panels (a)/(b)) -- each method also has its own marker shape (circle, square, "
+        "triangle, diamond, upside-down triangle, plus-sign) so a line stays identifiable even where "
+        "it overlaps another one exactly. The x-axis on every panel is 'experiment round' -- how "
+        "many of the 10 total experiments that method has run so far, left to right."
+    )
+    lines.append(
+        "- **(a) Surface reconstruction**: lower is better. At each round, how far off (RMSE, in "
+        "ppm) that method's current best guess at the WHOLE VOC(PAR, temp) surface is from the "
+        "truth. The shaded band around each line is +/- 1 standard deviation across the "
+        f"{N_SEEDS} independent repeats -- a wide band means that method's outcome varies a lot "
+        "run to run at that round, not just that the mean is uncertain."
+    )
+    lines.append(
+        "- **(b) Finding good conditions**: higher is better (100% = the dashed line = the best "
+        "conditions physically possible). At each round, the best true VOC value that method has "
+        "found SO FAR, as a % of the true maximum. **All 6 lines are IDENTICAL for rounds 1-4** -- "
+        "every method starts from the same 4 shared seed experiments by design (a fair comparison "
+        "needs a common starting point) -- so only one line is visible there, sitting exactly on top "
+        "of the other five. From round 5 onward the lines are each method's OWN choices, but they "
+        "often stay within a few percentage points of each other, which can also look like 'one line' "
+        "at this panel's necessary 0-100% scale even though the underlying numbers do differ -- that's "
+        "what panel (c) is for."
+    )
+    lines.append(
+        "- **(c) Panel (b), zoomed to rounds 4-10**: the exact same numbers as panel (b)'s tail end, "
+        "just re-plotted with the y-axis zoomed into whatever narrow range the actual data spans "
+        "(computed fresh each run, not a fixed zoom level) -- this is where the real, if small, "
+        "separation between methods actually becomes visible. A method whose line is HIGHER here "
+        "found better conditions than one whose line is lower, even though both looked flat in panel "
+        "(b)."
+    )
+    lines.append("")
+    lines.append("### `dynamics_recovery.png` (Test 3) -- 3 panels")
+    lines.append("")
+    lines.append(
+        "- **(a) Input: applied light profile**: the PAR (light intensity) schedule that was "
+        "actually applied during the one simulated experiment this test uses -- a smooth up-down "
+        "wave (sinusoid), repeating 3 times over the run. This is the INPUT; nothing is being "
+        "measured or fitted here, it's just showing what light schedule the reactor was given."
+    )
+    lines.append(
+        "- **(b) Ground truth #1: dynamic VOC response**: how VOC output actually rises and falls "
+        "OVER TIME in response to that light schedule -- rising while light increases, falling while "
+        "it decreases, with a short lag (never perfectly in sync with panel (a), since VOC output "
+        "takes a little time to catch up to a light change). This is the TRUE answer the discovery "
+        "tool is trying to recover; it is not itself a comparison of methods, just what really "
+        "happened."
+    )
+    lines.append(
+        "- **(c) Discovered-equation accuracy**: two bars -- how far off (RMSE) the EQUATION that "
+        "`discover_led_response_dynamics` came up with is from the true underlying rate-of-change "
+        "law, without (blue) vs. with (orange) the ambient-baseline correction applied first. The R² "
+        "value printed above each bar is the same comparison on a 0-1 scale (higher = better fit). "
+        "Shorter bar and higher R² = a more accurate discovered equation."
     )
     lines.append("")
 
@@ -594,7 +739,8 @@ def _write_report(
         "adaptive work that most DoE baselines aren't -- whether that's enough to lead on the raw "
         "score depends on where this particular ground truth's optimum happens to sit, which is "
         "exactly why both the raw and seed-adjusted numbers are reported rather than just one. See "
-        "`doe_comparison.png` for both metrics' full round-by-round picture."
+        "`doe_comparison.png` for both metrics' full round-by-round picture -- panel (c) is a zoomed "
+        "view of panel (b)'s tail end specifically to make this seed-adjusted separation visible."
     )
     lines.append("")
     lines.append(
