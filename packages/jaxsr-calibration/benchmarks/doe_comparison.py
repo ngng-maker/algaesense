@@ -80,16 +80,22 @@ LABWIKI_NOTE_TEXT = (
 LABWIKI_BOUND_OVERRIDE = {"par_umol_m2_s": (PAR_BOUNDS[0], PHOTO_THRESHOLD_PAR)}
 
 
-def _compute_true_global_max() -> float:
+def _compute_true_global_max() -> tuple[float, float, float]:
     """The real maximum of true_voc_ppm over the whole domain -- what
-    'best_found_by_round' is measured against. A fine grid (not the
-    coarser DENSE_GRID_N used for surface-RMSE scoring) since this one
-    number anchors every best-found-value percentage in the report."""
+    'best_found_by_round' is measured against -- plus WHERE it sits, so
+    the report can explain a method's performance (e.g. Grid's fixed
+    nodes happening to sit near/far from the true optimum) without ever
+    hardcoding a location that would go stale the moment the ground
+    truth function changes. A fine grid (not the coarser DENSE_GRID_N
+    used for surface-RMSE scoring) since this anchors every best-found-
+    value percentage in the report."""
     par_grid, temp_grid = np.meshgrid(np.linspace(*PAR_BOUNDS, 400), np.linspace(*TEMP_BOUNDS, 400))
-    return float(np.max(true_voc_ppm(par_grid.ravel(), temp_grid.ravel())))
+    values = true_voc_ppm(par_grid.ravel(), temp_grid.ravel())
+    i = int(np.argmax(values))
+    return float(values[i]), float(par_grid.ravel()[i]), float(temp_grid.ravel()[i])
 
 
-TRUE_GLOBAL_MAX = _compute_true_global_max()
+TRUE_GLOBAL_MAX, TRUE_GLOBAL_MAX_PAR, TRUE_GLOBAL_MAX_TEMP = _compute_true_global_max()
 
 """
 Every method shares the SAME 4 seed points (see doe_methods.SEED_POINTS),

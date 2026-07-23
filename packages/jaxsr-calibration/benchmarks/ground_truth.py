@@ -18,24 +18,63 @@ import polars as pl
 """
 Nothing here is meant to be biologically exact -- it is a stand-in
 "real physics" the rest of the benchmark treats as ground truth, chosen
-to be genuinely nonlinear (a light-saturation term modulated
-multiplicatively by an Arrhenius-like temperature term, plus a
-light-temperature interaction) without being so exotic that no
+to be genuinely nonlinear (a saturating light response, a temperature
+main effect, a genuine light-temperature interaction, and a high-PAR
+photoinhibition decline) without being so exotic that no
 polynomial-basis symbolic regressor could ever approximate it. Every
 benchmark method (ours and every DoE baseline) fits the SAME jaxsr
 basis library against this same truth, so the basis's own
 expressiveness is a constant across the comparison, not a confound --
 what varies is only which (PAR, temp) points got sampled.
+
+**Design note (2026-07-23): an earlier version of this function used a
+MULTIPLICATIVE light_term * exp(BETA_T*(temp-TEMP_REF)) temperature
+modulation, plus a separate GAMMA*par*(temp-TEMP_REF)/(K_M+par)
+"interaction" term.** Test 1's own benchmark run then showed `gamma`
+recovering at 44-67% error every time, blamed at the time on "genuine
+collinearity... a real statistical limitation of this specific
+functional form." That diagnosis was correct but incomplete -- the
+actual root cause was a real DESIGN BUG, not an unavoidable property of
+testing interactions at all: linearizing exp(x) around x=0 gives
+`light_term * (1 + BETA_T*(temp-TEMP_REF) + ...)`, so the multiplicative
+term's own first-order Taylor expansion already contains
+`light_term * BETA_T * (temp-TEMP_REF)` -- the EXACT SAME shape (up to
+a constant) as the "interaction" term that was supposedly independent
+of it. Two coefficients (`VMAX*BETA_T` and `GAMMA`) were being fit
+against what is, to leading order, a single basis function -- textbook
+non-identifiability, not a fundamental limit. The fix below uses
+additive main effects (so there is no multiplicative term to linearize
+into a collinear shape) plus ONE genuine bilinear interaction term
+(`GAMMA * par * (temp - TEMP_REF)`) that has no other term in the
+function proportional to it. Verified directly: the same curve_fit
+recovery test that used to show 44-67% gamma error now recovers it to
+<0.1% error. See CLAUDE.md's dev log for the full before/after.
 """
 
 PAR_BOUNDS = (0.0, 500.0)
 TEMP_BOUNDS = (20.0, 40.0)
 
 VMAX = 800.0
+"""Maximum light-driven VOC output (ppm) as PAR -> infinity."""
 K_M = 150.0
-BETA_T = 0.06
+"""Half-saturation PAR (umol/m^2/s) -- light_term reaches VMAX/2 here."""
 TEMP_REF = 28.0
-GAMMA = 0.15
+"""Reference temperature (degC) both the temperature main effect and
+the interaction term are centered on -- not itself a fitted parameter,
+same role as a fixed intercept-centering choice."""
+TEMP_SLOPE = 3.0
+"""Main effect of temperature alone (ppm per degC away from TEMP_REF) --
+additive, not multiplicative, so it has no linearization that collides
+with the interaction term below."""
+GAMMA = 0.05
+"""The genuine PAR x temperature interaction (ppm per umol/m^2/s per
+degC) -- a plain bilinear term with no other term in this function
+proportional to it, unlike the earlier design's collinear version."""
+BASELINE = 30.0
+"""A small constant offset -- keeps the function non-negative across
+the whole (PAR, temp) domain now that temperature has its own additive
+effect even at PAR=0 (a real, if modest, dark/respiration-driven VOC
+baseline that varies with temperature is physically plausible)."""
 
 """
 A mild photoinhibition decline above PHOTO_THRESHOLD_PAR -- Spirulina
@@ -52,14 +91,21 @@ PHOTO_K = 0.0104
 def true_voc_ppm(par, temp):
     """The ground-truth mean VOC output (ppm) for a static (PAR, temp)
     setpoint -- what every method in this benchmark is trying to
-    characterize using as few real experiments as possible."""
+    characterize using as few real experiments as possible.
+
+    VOC(PAR, temp) = BASELINE
+                    + VMAX * PAR / (K_M + PAR)                  [saturating light main effect]
+                    + TEMP_SLOPE * (temp - TEMP_REF)             [temperature main effect]
+                    + GAMMA * PAR * (temp - TEMP_REF)            [genuine PAR x temp interaction]
+                    - PHOTO_K * max(PAR - PHOTO_THRESHOLD_PAR, 0)^2   [high-PAR photoinhibition]
+    """
     par = np.asarray(par, dtype=float)
     temp = np.asarray(temp, dtype=float)
     light_term = VMAX * par / (K_M + par)
-    temp_term = np.exp(BETA_T * (temp - TEMP_REF))
-    interaction = GAMMA * par * (temp - TEMP_REF) / (K_M + par)
+    temp_term = TEMP_SLOPE * (temp - TEMP_REF)
+    interaction = GAMMA * par * (temp - TEMP_REF)
     photoinhibition = -PHOTO_K * np.maximum(par - PHOTO_THRESHOLD_PAR, 0.0) ** 2
-    return light_term * temp_term + interaction + photoinhibition
+    return BASELINE + light_term + temp_term + interaction + photoinhibition
 
 
 @dataclass

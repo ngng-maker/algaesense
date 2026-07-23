@@ -54,19 +54,20 @@ TRUE_CALIBRATION = {
 CALIBRATION_RUN_ID = "benchmark_cal_01"
 
 
-def _true_voc_curve_form(xy, vmax, k_m, beta_t, gamma, photo_k):
+def _true_voc_curve_form(xy, vmax, k_m, temp_slope, gamma, photo_k, baseline):
     """The exact functional shape of true_voc_ppm, with unknown
     coefficients -- what curve_fit tries to recover from noisy/corrected
     observations, so we can quote a real percent-error-per-parameter
-    number rather than only a generic RMSE. photo_threshold_par (380) is
-    treated as a known constant, same as temp_ref -- not smoothly
-    identifiable via gradient-based curve_fit the way a coefficient is."""
+    number rather than only a generic RMSE. photo_threshold_par (380) and
+    temp_ref (28.0) are treated as known constants, not fitted -- not
+    smoothly identifiable via gradient-based curve_fit the way a
+    coefficient is."""
     par, temp = xy
     light_term = vmax * par / (k_m + par)
-    temp_term = np.exp(beta_t * (temp - 28.0))
-    interaction = gamma * par * (temp - 28.0) / (k_m + par)
+    temp_term = temp_slope * (temp - 28.0)
+    interaction = gamma * par * (temp - 28.0)
     photoinhibition = -photo_k * np.maximum(par - 380.0, 0.0) ** 2
-    return light_term * temp_term + interaction + photoinhibition
+    return baseline + light_term + temp_term + interaction + photoinhibition
 
 
 @dataclass
@@ -76,16 +77,22 @@ class RecoveryResult:
     param_pct_error: dict[str, float]
     rmse_vs_true_ppm: float
     r2_on_dense_grid: float
+    par_values: list[float] | None = None
+    temp_values: list[float] | None = None
+    measured_ppm: list[float] | None = None
+    true_ppm: list[float] | None = None
 
 
 def _fit_and_score(par_values: np.ndarray, temp_values: np.ndarray, ppm_values: np.ndarray) -> RecoveryResult:
-    true_params = {"vmax": 800.0, "k_m": 150.0, "beta_t": 0.06, "gamma": 0.15, "photo_k": 0.0104}
-    p0 = [600.0, 200.0, 0.05, 0.1, 0.005]
-    bounds = ([1.0, 1.0, -1.0, -5.0, 0.0], [5000.0, 5000.0, 1.0, 5.0, 1.0])
+    true_params = {
+        "vmax": 800.0, "k_m": 150.0, "temp_slope": 3.0, "gamma": 0.05, "photo_k": 0.0104, "baseline": 30.0,
+    }
+    p0 = [600.0, 200.0, 1.0, 0.02, 0.005, 10.0]
+    bounds = ([1.0, 1.0, -20.0, -5.0, 0.0, -200.0], [5000.0, 5000.0, 20.0, 5.0, 1.0, 200.0])
     popt, _ = curve_fit(
         _true_voc_curve_form, (par_values, temp_values), ppm_values, p0=p0, bounds=bounds, maxfev=20000
     )
-    recovered = dict(zip(["vmax", "k_m", "beta_t", "gamma", "photo_k"], popt))
+    recovered = dict(zip(["vmax", "k_m", "temp_slope", "gamma", "photo_k", "baseline"], popt))
     pct_error = {
         name: 100.0 * abs(recovered[name] - true_params[name]) / abs(true_params[name])
         for name in true_params
@@ -101,7 +108,15 @@ def _fit_and_score(par_values: np.ndarray, temp_values: np.ndarray, ppm_values: 
     r2 = float(1.0 - ss_res / ss_tot)
 
     return RecoveryResult(
-        label="", recovered_params=recovered, param_pct_error=pct_error, rmse_vs_true_ppm=rmse, r2_on_dense_grid=r2
+        label="",
+        recovered_params=recovered,
+        param_pct_error=pct_error,
+        rmse_vs_true_ppm=rmse,
+        r2_on_dense_grid=r2,
+        par_values=[float(v) for v in par_values],
+        temp_values=[float(v) for v in temp_values],
+        measured_ppm=[float(v) for v in ppm_values],
+        true_ppm=[float(v) for v in true_voc_ppm(par_values, temp_values)],
     )
 
 
