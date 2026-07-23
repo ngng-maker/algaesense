@@ -125,15 +125,19 @@ def _score_model(model, state_names: list[str]) -> tuple[float, float]:
     return rmse, r2
 
 
-def _discover_dynamics_from_readings(readings: pl.DataFrame, max_terms: int = 5):
+def _discover_dynamics_from_readings(readings: pl.DataFrame, max_terms: int = 5, strategy: str = "exhaustive"):
     """Mirrors discover_led_response_dynamics's own internal steps
     exactly (load_timeseries_for_jaxsr -> jaxsr.discover_dynamics), just
     called directly on an in-memory DataFrame so the live model objects
     are available for scoring -- the public function deliberately strips
     those (see its DynamicsDiscoveryResult docstring), same reasoning
-    Test 2 already used for its own internal scoring fit."""
+    Test 2 already used for its own internal scoring fit. `strategy`
+    defaults to "exhaustive" to match the production function's own
+    default (see its docstring for why) -- keeping this in sync matters
+    since run_dynamics_recovery_test cross-checks this internal-pieces
+    result's equation against the real function's own output."""
     X, t, state_names = load_timeseries_for_jaxsr(readings, state_columns=["ppm_asgas", "reactor_par_umol_m2_s"])
-    result = jaxsr.discover_dynamics(X, t, state_names=state_names, max_terms=max_terms)
+    result = jaxsr.discover_dynamics(X, t, state_names=state_names, max_terms=max_terms, strategy=strategy)
     return result, state_names
 
 

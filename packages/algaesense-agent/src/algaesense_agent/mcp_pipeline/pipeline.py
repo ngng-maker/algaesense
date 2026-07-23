@@ -486,6 +486,7 @@ def discover_led_response_dynamics(
     until: dt.datetime | None = None,
     max_terms: int = 5,
     derivative_method: str = "finite_difference",
+    strategy: str = "exhaustive",
     ambient_baseline_run_id: str | None = None,
 ) -> DynamicsDiscoveryResult:
     """Feed one experiment's real, per-second VOC trajectory -- with the
@@ -501,7 +502,23 @@ def discover_led_response_dynamics(
     consistently improve dynamics recovery (R^2 against the true
     derivative law rose from ~0.59 to ~0.79 across every repeat tested).
     Omitted by default (`None`) for backward compatibility: without it,
-    calibration is applied to raw voltage exactly as before."""
+    calibration is applied to raw voltage exactly as before.
+
+    `strategy` defaults to `"exhaustive"` rather than jaxsr's own default
+    `"greedy_forward"` -- confirmed, in the same synthetic benchmark, that
+    greedy selection reliably missed the true dominant linear term in
+    favor of quadratic/cubic surrogates (R^2 ~0.21), while exhaustive
+    search recovered it (R^2 ~0.64), a real instance of greedy forward
+    selection's classic failure mode (an early locally-good pick blocking
+    a later, globally-better combination), not a derivative-noise or
+    basis-coverage problem (switching `derivative_method` alone barely
+    moved the result). Safe to default on here specifically because this
+    function always calls `jaxsr.discover_dynamics` with exactly two
+    states (`ppm_asgas`, `reactor_par_umol_m2_s`) and no caller-supplied
+    `basis_library`, so the default basis is always a fixed 8 terms --
+    exhaustive search over C(8, max_terms) combinations is trivially fast
+    regardless of how much data is passed. This would NOT be safe to
+    default on for an arbitrarily large custom basis library."""
 
     """
     Meant to be run over data collected during a control-profile run (a
@@ -619,7 +636,8 @@ def discover_led_response_dynamics(
     )
 
     result = jaxsr.discover_dynamics(
-        X, t, state_names=state_names, max_terms=max_terms, derivative_method=derivative_method
+        X, t, state_names=state_names, max_terms=max_terms, derivative_method=derivative_method,
+        strategy=strategy,
     )
 
     return DynamicsDiscoveryResult(

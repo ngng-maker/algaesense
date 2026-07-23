@@ -179,6 +179,7 @@ def _run_dynamics_recovery_repeated(n_seeds: int):
     per_label_rmse: dict[str, list[float]] = {}
     per_label_r2: dict[str, list[float]] = {}
     per_label_equation: dict[str, str] = {}
+    per_label_selected_features: dict[str, list[list[str]]] = {}
     representative_run = None
     for seed in range(n_seeds):
         print(f"  [Dynamics recovery] seed {seed + 1}/{n_seeds}")
@@ -189,7 +190,8 @@ def _run_dynamics_recovery_repeated(n_seeds: int):
             per_label_rmse.setdefault(label, []).append(result.rmse_vs_true_derivative)
             per_label_r2.setdefault(label, []).append(result.r2_vs_true_derivative)
             per_label_equation[label] = result.equation
-    return per_label_rmse, per_label_r2, per_label_equation, representative_run
+            per_label_selected_features.setdefault(label, []).append(result.selected_features)
+    return per_label_rmse, per_label_r2, per_label_equation, per_label_selected_features, representative_run
 
 
 def _plot_dynamics_recovery(run, per_label_rmse: dict, per_label_r2: dict, output_path: Path) -> None:
@@ -359,6 +361,7 @@ def _write_report(
     dynamics_rmse: dict,
     dynamics_r2: dict,
     dynamics_equations: dict,
+    dynamics_selected_features: dict,
     report_path: Path,
 ) -> None:
     lines = ["# AlgaeSense pre-calibration + JAXSR benchmark report", ""]
@@ -819,21 +822,58 @@ def _write_report(
         f"improvement on real hardware data."
     )
     lines.append("")
-    lines.append(
-        "**An honest limitation, not papered over:** the discovered equation, in every run "
-        "(both raw and corrected), consistently missed the true law's dominant term -- a plain "
-        "linear decay in `ppm_asgas` (coefficient -1/tau) -- selecting quadratic and cubic "
-        "surrogate terms in both `ppm_asgas` and `reactor_par_umol_m2_s` instead, at the default "
-        f"`max_terms=5` this project's own `discover_led_response_dynamics` uses. The resulting R^2 "
-        f"against the true derivative (raw {raw_r2:.2f}, corrected {corrected_r2:.2f}) reflects a "
-        "real, structurally-plausible but not exact recovery -- good enough to see that light "
-        "genuinely drives the response, not good enough to trust the exact discovered coefficients "
-        "as the true physical law. This is a "
-        "genuine basis-selection limitation of `jaxsr.discover_dynamics`'s own term search at "
-        "`max_terms=5`, distinct from Test 1's (now-resolved) `gamma`-collinearity issue -- here "
-        "the true term IS in the candidate basis and simply isn't the one greedily selected, worth "
-        "knowing before treating any single discovered dynamics equation's coefficients as exact."
-    )
+
+    """
+    Whether the true linear ppm_asgas self-decay term actually got
+    selected is computed fresh from the real selected_features returned
+    by each seed's fit, never hardcoded -- an earlier version of this
+    paragraph asserted "consistently missed" as a fixed claim, which went
+    stale (and became simply wrong) the moment discover_led_response_dynamics's
+    default selection strategy changed from greedy_forward to exhaustive
+    (see CLAUDE.md's dev log) and the true term started being recovered.
+    """
+
+    def _linear_term_fraction(label: str, term: str = "ppm_asgas") -> float:
+        seeds = dynamics_selected_features[label]
+        return sum(1 for feats in seeds if term in feats) / len(seeds)
+
+    raw_linear_frac = _linear_term_fraction(raw_label)
+    corrected_linear_frac = _linear_term_fraction(corrected_label)
+
+    def _recovery_fragment(frac: float, n_seeds: int) -> str:
+        if frac == 1.0:
+            return f"every one of the {n_seeds} seeds"
+        if frac == 0.0:
+            return f"none of the {n_seeds} seeds"
+        return f"{frac * n_seeds:.0f} of the {n_seeds} seeds"
+
+    if raw_linear_frac == 1.0 and corrected_linear_frac == 1.0:
+        lines.append(
+            f"**On the selection strategy:** `discover_led_response_dynamics` defaults to "
+            f"`strategy=\"exhaustive\"` rather than `jaxsr`'s own default `\"greedy_forward\"` -- "
+            f"confirmed here to matter: the true linear `ppm_asgas` decay term was genuinely "
+            f"recovered in {_recovery_fragment(raw_linear_frac, N_DYNAMICS_SEEDS)} (raw) and "
+            f"{_recovery_fragment(corrected_linear_frac, N_DYNAMICS_SEEDS)} (corrected), vs. a "
+            "strategy comparison run separately (not part of this repeated benchmark) where "
+            "`greedy_forward` reliably missed it in favor of quadratic/cubic surrogate terms at the "
+            "same `max_terms=5` -- a real instance of greedy forward selection's classic failure mode "
+            "(an early locally-good pick blocking a later, globally-better combination), not a "
+            "derivative-noise or basis-coverage problem. Exhaustive search is tractable here "
+            "specifically because this function always uses a fixed, small 2-state default basis "
+            "(8 candidate terms); it would need its own tractability check before being assumed safe "
+            "for a much larger custom basis library."
+        )
+    else:
+        lines.append(
+            f"**An honest limitation, not papered over:** the true linear `ppm_asgas` decay term was "
+            f"recovered in only {_recovery_fragment(raw_linear_frac, N_DYNAMICS_SEEDS)} (raw) and "
+            f"{_recovery_fragment(corrected_linear_frac, N_DYNAMICS_SEEDS)} (corrected) -- "
+            f"inconsistent recovery across seeds at the current `max_terms=5`/`strategy=\"exhaustive\"` "
+            f"settings. The resulting R^2 against the true derivative (raw {raw_r2:.2f}, corrected "
+            f"{corrected_r2:.2f}) reflects a real, structurally-plausible but not always exact "
+            "recovery -- good enough to see that light genuinely drives the response, not always "
+            "good enough to trust the exact discovered coefficients as the true physical law."
+        )
 
     report_path.write_text("\n".join(lines), encoding="utf-8")
 
@@ -857,12 +897,12 @@ def main() -> None:
     _plot_doe_comparison(rmse_curves, best_found_curves, OUTPUT_DIR / "doe_comparison.png")
 
     print(f"\nRunning Test 3 (dynamics recovery, {N_DYNAMICS_SEEDS} repeats)...")
-    dynamics_rmse, dynamics_r2, dynamics_equations, representative_run = _run_dynamics_recovery_repeated(N_DYNAMICS_SEEDS)
+    dynamics_rmse, dynamics_r2, dynamics_equations, dynamics_selected_features, representative_run = _run_dynamics_recovery_repeated(N_DYNAMICS_SEEDS)
     _plot_dynamics_recovery(representative_run, dynamics_rmse, dynamics_r2, OUTPUT_DIR / "dynamics_recovery.png")
 
     _write_report(
         calibration_results, rmse_curves, best_found_curves, dynamics_rmse, dynamics_r2, dynamics_equations,
-        OUTPUT_DIR / "REPORT.md",
+        dynamics_selected_features, OUTPUT_DIR / "REPORT.md",
     )
 
     print(f"\nDone. Results written to {OUTPUT_DIR}/")
