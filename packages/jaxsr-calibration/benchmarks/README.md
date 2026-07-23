@@ -17,6 +17,14 @@ Not part of the pytest suite -- this is an analysis/report, not a pass/fail corr
 
 ## Running it
 
+Needs `jaxsr-calibration` installed with its `benchmarks` extra (pulls in `matplotlib`, the only dependency this script needs beyond the package's own core deps):
+
+```
+pip install -e "packages/jaxsr-calibration[benchmarks]"
+```
+
+Then:
+
 ```
 .venv/Scripts/python.exe packages/jaxsr-calibration/benchmarks/run_all.py
 ```

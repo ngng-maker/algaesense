@@ -35,6 +35,9 @@ dependencies = [
 [project.optional-dependencies]
 hardware = ["smbus2", "pyserial"]
 dashboard = ["streamlit"]
+# Only needed to run packages/jaxsr-calibration/benchmarks/run_all.py, which
+# plots its results -- not needed to import or use the package itself.
+benchmarks = ["matplotlib"]
 # Only needed on a machine actually configured to use the Firebase remote-
 # storage backend (see jaxsr_calibration/storage/firebase_backend.py) --
 # the local-disk and "no remote storage" backends need nothing extra.
