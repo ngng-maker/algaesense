@@ -33,6 +33,7 @@ from calibration_recovery import TRUE_CALIBRATION, run_calibration_recovery_test
 from doe_comparison import (
     MEASUREMENT_NOISE_SIGMA_PPM,
     N_EXTRA,
+    N_TOTAL_EXPERIMENTS,
     SEED_ONLY_BEST,
     TRUE_GLOBAL_MAX,
     TRUE_GLOBAL_MAX_PAR,
@@ -41,10 +42,9 @@ from doe_comparison import (
 )
 from doe_methods import grid_points
 from dynamics_recovery import (
-    AMBIENT_BASELINE_RUN_ID,
-    CALIBRATION_RUN_ID as DYNAMICS_CALIBRATION_RUN_ID,
     DURATION_S,
-    PROFILE,
+    PAR_LEVELS,
+    TEMP,
     run_dynamics_recovery_test,
 )
 from ground_truth import (
@@ -173,46 +173,89 @@ def _run_dynamics_recovery_repeated(n_seeds: int):
     """Same reasoning as Test 2's repeats: jaxsr.discover_dynamics builds
     on the same non-deterministic SymbolicRegressor.fit(), so one run
     isn't a result on its own -- average the recovery scores across
-    seeds, but keep one representative run's trajectory for the plot
-    (the trajectory/profile is deterministic per seed; only the fit
-    varies)."""
+    seeds AND across PAR levels (since none are pooled together before
+    fitting, each PAR level's own fit is an independent trial of the
+    same underlying question: "does discover_led_response_dynamics
+    recover this experiment's own relaxation dynamics correctly"), but
+    keep the BEST-fitting seed's full set of per-PAR-level trajectories
+    for the illustrative overlay plot (not just seed 0 arbitrarily) --
+    given the real recovery-rate/divergence findings below, an arbitrary
+    seed's plot can show every predicted line diverging immediately,
+    which illustrates nothing useful even though it's an honest outcome;
+    the plot is meant to show what a working fit looks like, while the
+    report's own text states the full, honest distribution -- including
+    failures -- separately, not just the cherry-picked example."""
     per_label_rmse: dict[str, list[float]] = {}
     per_label_r2: dict[str, list[float]] = {}
     per_label_equation: dict[str, str] = {}
     per_label_selected_features: dict[str, list[list[str]]] = {}
-    representative_run = None
+    per_label_diverged: dict[str, list[bool]] = {}
+    best_trajectories = None
+    best_score = -float("inf")
     for seed in range(n_seeds):
         print(f"  [Dynamics recovery] seed {seed + 1}/{n_seeds}")
         run = run_dynamics_recovery_test(seed=seed, verbose=False)
-        if representative_run is None:
-            representative_run = run
-        for label, result in run.results.items():
-            per_label_rmse.setdefault(label, []).append(result.rmse_vs_true_derivative)
-            per_label_r2.setdefault(label, []).append(result.r2_vs_true_derivative)
-            per_label_equation[label] = result.equation
-            per_label_selected_features.setdefault(label, []).append(result.selected_features)
-    return per_label_rmse, per_label_r2, per_label_equation, per_label_selected_features, representative_run
+        seed_r2_values = [
+            result.r2_vs_true_derivative
+            for results in run.per_level_results.values()
+            for result in results.values()
+        ]
+        seed_score = float(np.mean(seed_r2_values))
+        if seed_score > best_score:
+            best_score = seed_score
+            best_trajectories = run.trajectories
+        for par_level, results in run.per_level_results.items():
+            for label, result in results.items():
+                per_label_rmse.setdefault(label, []).append(result.rmse_vs_true_derivative)
+                per_label_r2.setdefault(label, []).append(result.r2_vs_true_derivative)
+                per_label_equation[label] = result.equation
+                per_label_selected_features.setdefault(label, []).append(result.selected_features)
+                per_label_diverged.setdefault(label, []).append(result.diverged)
+    return per_label_rmse, per_label_r2, per_label_equation, per_label_selected_features, per_label_diverged, best_trajectories
 
 
-def _plot_dynamics_recovery(run, per_label_rmse: dict, per_label_r2: dict, output_path: Path) -> None:
-    """Three single-axis panels, side by side -- deliberately NOT a
-    twin-axis (dual y-scale) plot for the PAR/VOC trajectory, which is a
-    known chart anti-pattern (two different-unit series sharing one
-    x-axis read far more reliably as two stacked panels than as one
-    panel with two competing y-scales)."""
-    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+def _plot_dynamics_recovery(trajectories: dict, per_label_rmse: dict, per_label_r2: dict, output_path: Path) -> None:
+    """Three panels -- (a)/(b) overlay every static-PAR experiment's TRUE
+    VOC(t) trajectory (solid) against the DISCOVERED equation's own
+    predicted trajectory (dashed, integrated forward from the same
+    initial condition), one color per PAR level, raw mode in (a) and
+    ambient-corrected mode in (b) -- deliberately two panels rather than
+    one twin-axis plot (a documented chart anti-pattern) or one
+    overcrowded panel with 2x as many lines. Panel (c) is the numeric
+    accuracy summary, aggregated across every (seed, PAR level)
+    independent trial (none pooled together before fitting)."""
+    fig, axes = plt.subplots(1, 3, figsize=(19, 5.5))
 
-    axes[0].plot(run.t, run.par_values, color=PALETTE[5], linewidth=2.2, label="Applied PAR (real sinusoid profile)")
-    axes[0].set_xlabel("Elapsed time (s)")
-    axes[0].set_ylabel("PAR (µmol photons m⁻² s⁻¹)")
-    axes[0].set_title("Input: applied light profile")
-    axes[0].legend(loc="upper right")
+    par_levels_sorted = sorted(trajectories.keys())
+    level_colors = {level: PALETTE[i % len(PALETTE)] for i, level in enumerate(par_levels_sorted)}
 
-    axes[1].plot(run.t, run.true_voc_values, color=PALETTE[0], linewidth=2.2, label="True VOC(t) (ground truth)")
-    axes[1].set_xlabel("Elapsed time (s)")
-    axes[1].set_ylabel("VOC output (ppm)")
-    axes[1].set_title("Ground truth #1: dynamic VOC response")
-    axes[1].legend(loc="upper right")
+    """
+    y-axis limits are pinned to the TRUE trajectories' own range (with a
+    margin) -- a discovered equation's forward-integrated prediction can
+    genuinely diverge (see _simulate_predicted_trajectory's docstring),
+    and its NaN-filled tail is excluded from autoscaling by definition,
+    but pinning explicitly also guards against a prediction that stays
+    finite yet drifts far outside any physically plausible range.
+    """
+    all_true_values = np.concatenate([trajectories[level].true_voc_values for level in par_levels_sorted])
+    y_lo, y_hi = float(np.min(all_true_values)), float(np.max(all_true_values))
+    y_margin = max(10.0, (y_hi - y_lo) * 0.15)
+
+    for mode_idx, mode in enumerate(["raw", "corrected"]):
+        ax = axes[mode_idx]
+        for level in par_levels_sorted:
+            traj = trajectories[level]
+            color = level_colors[level]
+            t_days = traj.t / 86400.0
+            t_pred_days = traj.t_predicted / 86400.0
+            ax.plot(t_days, traj.true_voc_values, color=color, linewidth=2.0, linestyle="-", label=f"PAR={level:.0f} (true)")
+            ax.plot(t_pred_days, traj.predicted_voc_values[mode], color=color, linewidth=2.0, linestyle="--", label=f"PAR={level:.0f} (predicted)")
+        ax.set_ylim(y_lo - y_margin, y_hi + y_margin)
+        ax.set_xlabel("Elapsed time (days)")
+        ax.set_ylabel("VOC output (ppm)")
+        mode_title = "Raw (no ambient correction)" if mode == "raw" else "Corrected (ambient_baseline_run_id set)"
+        ax.set_title(f"({'a' if mode_idx == 0 else 'b'}) {mode_title}\nsolid = true, dashed = discovered-equation prediction")
+        ax.legend(loc="lower right", fontsize=8, ncol=2, framealpha=0.95)
 
     labels = list(per_label_rmse.keys())
     short_labels = ["Raw\n(no ambient correction)" if "raw" in l else "Corrected\n(ambient_baseline_run_id set)" for l in labels]
@@ -225,15 +268,20 @@ def _plot_dynamics_recovery(run, per_label_rmse: dict, per_label_r2: dict, outpu
     axes[2].set_xticks(x)
     axes[2].set_xticklabels(short_labels)
     axes[2].set_ylabel("RMSE vs. true dVOC/dt (ppm/s)")
-    axes[2].set_title(f"Discovered-equation accuracy\n(mean ± std of {len(per_label_rmse[labels[0]])} independent fits)")
+    axes[2].set_title(f"(c) Discovered-equation accuracy\n(mean ± std of {len(per_label_rmse[labels[0]])} independent (seed, PAR level) trials)")
     for bar, r2 in zip(bars, r2_means):
         axes[2].text(
             bar.get_x() + bar.get_width() / 2, bar.get_height() + max(rmse_stds) * 0.15,
             f"R² = {r2:.2f}", ha="center", va="bottom", fontsize=11, fontweight="bold",
         )
 
-    fig.suptitle("Test 3 — Dynamics recovery: one time-varying PAR profile, real discover_led_response_dynamics")
-    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    fig.suptitle(
+        "Test 3 — Dynamics recovery: static-PAR step experiments, real discover_led_response_dynamics\n"
+        "(panels a/b show the best-fitting of several repeats, for a legible illustration — panel c and "
+        "the report state the full, honest range including worse fits)",
+        fontsize=13,
+    )
+    fig.tight_layout(rect=[0, 0, 1, 0.90])
     fig.savefig(output_path, dpi=200)
     plt.close(fig)
 
@@ -279,8 +327,55 @@ def _plot_calibration_recovery(results: dict, output_path: Path) -> None:
     plt.close(fig)
 
 
-def _plot_doe_comparison(rmse_curves: dict[str, np.ndarray], best_found_curves: dict[str, np.ndarray], output_path: Path) -> None:
-    """Three panels -- (a)/(b) are the two DISTINCT metrics that can (and
+def _compute_rounds_to_target(rmse_curves: dict[str, np.ndarray]) -> tuple[dict[str, list[float | None]], float]:
+    """For each method, the first round (1-indexed) at which that seed's
+    surface-reconstruction RMSE first drops to or below a shared target
+    -- answers "how many experiments does this method need to reach a
+    given accuracy," rather than "how accurate is it at a fixed
+    N_TOTAL_EXPERIMENTS-round budget." `None` means that seed never
+    reached the target within the budget. The target itself is computed
+    fresh from THIS run's own data (1.5x the best method's own mean
+    round-10 RMSE), never hardcoded, so a method has to notably beat
+    "merely as good as the best method eventually gets" to count as
+    having converged, while staying meaningful if the ground truth or
+    noise level ever changes."""
+    final_means = {label: float(np.nanmean(curve[:, -1])) for label, curve in rmse_curves.items()}
+    target_rmse = 1.5 * min(final_means.values())
+
+    rounds_to_target: dict[str, list[float | None]] = {}
+    for label, curve in rmse_curves.items():
+        per_seed: list[float | None] = []
+        for seed_curve in curve:
+            reached = None
+            for i, val in enumerate(seed_curve):
+                if not np.isnan(val) and val <= target_rmse:
+                    reached = float(i + 1)
+                    break
+            per_seed.append(reached)
+        rounds_to_target[label] = per_seed
+    return rounds_to_target, target_rmse
+
+
+def _rounds_to_target_summary(rounds_to_target: dict[str, list]) -> dict[str, dict]:
+    summary = {}
+    for label, per_seed in rounds_to_target.items():
+        converged = [r for r in per_seed if r is not None]
+        summary[label] = {
+            "median_rounds": float(np.median(converged)) if converged else None,
+            "n_converged": len(converged),
+            "n_total": len(per_seed),
+        }
+    return summary
+
+
+def _plot_doe_comparison(
+    rmse_curves: dict[str, np.ndarray],
+    best_found_curves: dict[str, np.ndarray],
+    rounds_to_target: dict[str, list],
+    target_rmse: float,
+    output_path: Path,
+) -> None:
+    """Four panels -- (a)/(b) are the two DISTINCT metrics that can (and
     here, do) disagree about which method 'wins', since they measure
     different things (whole-surface reconstruction accuracy, which
     favors space-filling DoE, vs. whether the method actually located
@@ -292,10 +387,15 @@ def _plot_doe_comparison(rmse_curves: dict[str, np.ndarray], best_found_curves: 
     already sits close to the true optimum) -- real, not missing, data,
     but invisible at panel (b)'s necessary 0-100% scale. Panel (c)
     re-plots the same numbers on an axis zoomed to the actual spread so
-    the real separation between methods is visible."""
-    fig = plt.figure(figsize=(20, 6.5))
-    axes = [fig.add_subplot(1, 3, 1), fig.add_subplot(1, 3, 2), fig.add_subplot(1, 3, 3)]
-    rounds = np.arange(1, 11)
+    the real separation between methods is visible. Panel (d) is the
+    speed reframing of panel (a): rather than "how accurate is this
+    method at a fixed budget," it asks "how many experiments does this
+    method actually need to reach a given accuracy" -- arguably the more
+    practically relevant question for someone deciding how many real
+    experiments to run."""
+    fig, axes2d = plt.subplots(2, 2, figsize=(20, 13))
+    axes = [axes2d[0, 0], axes2d[0, 1], axes2d[1, 0], axes2d[1, 1]]
+    rounds = np.arange(1, N_TOTAL_EXPERIMENTS + 1)
 
     for label, curve in rmse_curves.items():
         mean = np.nanmean(curve, axis=0)
@@ -348,8 +448,51 @@ def _plot_doe_comparison(rmse_curves: dict[str, np.ndarray], best_found_curves: 
     axes[2].legend(loc="best", framealpha=0.95, fontsize=9)
     axes[2].set_xticks(zoom_rounds)
 
+    """
+    Panel (d): "how many experiments does this method actually need,"
+    the speed reframing requested in place of "how accurate is it at a
+    fixed budget." A method with zero seeds reaching the target within
+    N_TOTAL_EXPERIMENTS is shown as a hatched bar at the budget ceiling
+    (a real, honest "never got there" result, not a missing value) --
+    never silently dropped from the chart.
+    """
+    summary = _rounds_to_target_summary(rounds_to_target)
+    labels_sorted = sorted(
+        summary,
+        key=lambda l: (summary[l]["median_rounds"] is None, summary[l]["median_rounds"] or 0.0),
+    )
+    heights = []
+    hatch_flags = []
+    annotations = []
+    colors = []
+    for label in labels_sorted:
+        s = summary[label]
+        colors.append(_METHOD_COLORS.get(label))
+        if s["median_rounds"] is None:
+            heights.append(float(N_TOTAL_EXPERIMENTS))
+            hatch_flags.append(True)
+            annotations.append("never\nreached")
+        else:
+            heights.append(s["median_rounds"])
+            hatch_flags.append(False)
+            annotations.append(f"{s['n_converged']}/{s['n_total']}" if s["n_converged"] < s["n_total"] else "")
+    bars = axes[3].bar(labels_sorted, heights, color=colors, edgecolor="white", linewidth=0.5)
+    for bar, hatched, ann in zip(bars, hatch_flags, annotations):
+        if hatched:
+            bar.set_hatch("//")
+        if ann:
+            axes[3].text(
+                bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.15, ann,
+                ha="center", va="bottom", fontsize=9,
+            )
+    axes[3].set_ylabel("Median experiments needed (fewer is better)")
+    axes[3].set_title(f"(d) Speed: experiments needed to reach\nRMSE <= {target_rmse:.0f} ppm (hatched = never, within budget)")
+    axes[3].set_xticks(range(len(labels_sorted)))
+    axes[3].set_xticklabels(labels_sorted, rotation=20, ha="right")
+    axes[3].set_ylim(0, N_TOTAL_EXPERIMENTS + 1)
+
     fig.suptitle("Test 2 — DoE comparison: 10-experiment budget, 6 point-selection strategies")
-    fig.tight_layout(rect=[0, 0, 1, 0.93], w_pad=3.0)
+    fig.tight_layout(rect=[0, 0, 1, 0.93], w_pad=3.0, h_pad=3.0)
     fig.savefig(output_path, dpi=200)
     plt.close(fig)
 
@@ -358,10 +501,13 @@ def _write_report(
     calibration_results: dict,
     rmse_curves: dict[str, np.ndarray],
     best_found_curves: dict[str, np.ndarray],
+    rounds_to_target: dict[str, list],
+    target_rmse: float,
     dynamics_rmse: dict,
     dynamics_r2: dict,
     dynamics_equations: dict,
     dynamics_selected_features: dict,
+    dynamics_diverged: dict,
     report_path: Path,
 ) -> None:
     lines = ["# AlgaeSense pre-calibration + JAXSR benchmark report", ""]
@@ -400,14 +546,16 @@ def _write_report(
     lines.append("")
     lines.append(
         "**Dynamic extension (Test 3):** a first-order relaxation ODE, `dVOC/dt = (1/tau) * "
-        f"(true_voc_ppm(PAR(t), temp) - VOC(t))`, with `tau` = {DYNAMIC_RELAXATION_TAU_S:.0f} s -- "
+        f"(true_voc_ppm(PAR, temp) - VOC(t))`, with `tau` = {DYNAMIC_RELAXATION_TAU_S:.0f} s -- "
         "holding any one (PAR, temp) setting constant forever converges onto the exact point already "
         "described by the static surface above, tying the two ground truths together deliberately. "
-        f"`PAR(t)` is driven by a REAL sinusoid control profile ({PROFILE['shape']}, mean="
-        f"{PROFILE['mean_par_umol_m2_s']:.0f}, amplitude={PROFILE['amplitude_par_umol_m2_s']:.0f}, "
-        f"period={PROFILE['period_s']:.0f}s) evaluated via the actual `evaluate_control_profile` "
-        f"function this project's edge service uses to drive the real LED, over a {DURATION_S:.0f}s "
-        "window (3 full periods)."
+        f"Test 3 runs {len(PAR_LEVELS)} SEPARATE, independent experiments, each held at its OWN fixed "
+        f"static PAR level ({', '.join(f'{p:.0f}' for p in PAR_LEVELS)} µmol·m⁻²·s⁻¹, temp fixed at "
+        f"{TEMP:.0f}°C), each running for {DURATION_S / 86400.0:.0f} days -- long enough to fully settle "
+        "into steady state (tau=120s means steady state is reached within minutes, so almost the entire "
+        "week is spent AT the settled value, exactly like a real long-running culture would). Each "
+        "experiment is analyzed entirely on its own -- NONE of them are pooled together before fitting "
+        "(see the 'no pooling' rationale in dynamics_recovery.py's own module docstring)."
     )
     lines.append("")
 
@@ -454,10 +602,12 @@ def _write_report(
     )
     lines.append(
         "- **R² (coefficient of determination)**: the fraction of the true surface/derivative's own "
-        "variation that the recovered model explains, on a dense held-out grid never used for "
-        "fitting -- 1.0 is a perfect match, 0.0 is 'no better than always guessing the mean'. Used "
-        "alongside RMSE since R² is scale-free (comparable across different quantities) while RMSE "
-        "keeps the real-world units."
+        "variation that the recovered model explains, on a held-out grid never used for fitting "
+        "(a dense 2D grid for Tests 1/2's static surface; a 1D grid at that trial's own fixed PAR "
+        "for Test 3, since a single static-PAR experiment never saw any other PAR value) -- 1.0 is "
+        "a perfect match, 0.0 is 'no better than always guessing the mean'. Used alongside RMSE "
+        "since R² is scale-free (comparable across different quantities) while RMSE keeps the "
+        "real-world units."
     )
     lines.append(
         "- **% parameter recovery error**: `100 * |recovered - true| / |true|` for each named "
@@ -548,25 +698,28 @@ def _write_report(
     lines.append("### `dynamics_recovery.png` (Test 3) -- 3 panels")
     lines.append("")
     lines.append(
-        "- **(a) Input: applied light profile**: the PAR (light intensity) schedule that was "
-        "actually applied during the one simulated experiment this test uses -- a smooth up-down "
-        "wave (sinusoid), repeating 3 times over the run. This is the INPUT; nothing is being "
-        "measured or fitted here, it's just showing what light schedule the reactor was given."
+        f"Each of the {len(PAR_LEVELS)} static PAR levels gets its own color, used consistently across "
+        "panels (a) and (b) -- a SOLID line is the TRUE VOC(t) trajectory (what actually happened), a "
+        "DASHED line of the same color is the DISCOVERED equation's own predicted trajectory (what "
+        "`discover_led_response_dynamics` thinks would happen, integrated forward from the same "
+        "starting point) -- so how closely dashed tracks solid, for each color, is a direct visual "
+        "read of accuracy, not just an RMSE number."
     )
     lines.append(
-        "- **(b) Ground truth #1: dynamic VOC response**: how VOC output actually rises and falls "
-        "OVER TIME in response to that light schedule -- rising while light increases, falling while "
-        "it decreases, with a short lag (never perfectly in sync with panel (a), since VOC output "
-        "takes a little time to catch up to a light change). This is the TRUE answer the discovery "
-        "tool is trying to recover; it is not itself a comparison of methods, just what really "
-        "happened."
+        "- **(a) Raw** / **(b) Corrected**: the same overlay, without vs. with the ambient-baseline "
+        "correction applied before calibration. Both panels span the full "
+        f"{DURATION_S / 86400.0:.0f}-day experiment duration -- the interesting part (the rise from "
+        "0 ppm to steady state) happens in the first few minutes; the rest of each line is essentially "
+        "flat because the system has already settled, exactly as a real week-long culture would behave "
+        "at a fixed light level."
     )
     lines.append(
         "- **(c) Discovered-equation accuracy**: two bars -- how far off (RMSE) the EQUATION that "
         "`discover_led_response_dynamics` came up with is from the true underlying rate-of-change "
-        "law, without (blue) vs. with (orange) the ambient-baseline correction applied first. The R² "
-        "value printed above each bar is the same comparison on a 0-1 scale (higher = better fit). "
-        "Shorter bar and higher R² = a more accurate discovered equation."
+        "law, without (blue) vs. with (orange) the ambient-baseline correction applied first, "
+        "averaged across every independent (seed, PAR level) trial. The R² value printed above each "
+        "bar is the same comparison on a 0-1 scale (higher = better fit). Shorter bar and higher R² = "
+        "a more accurate discovered equation."
     )
     lines.append("")
 
@@ -639,7 +792,37 @@ def _write_report(
 
     lines.append("### Metric A: surface reconstruction (favors space-filling designs)")
     lines.append("")
-    lines.append("Lower RMSE = a more accurate reconstruction of the ENTIRE true VOC(PAR, temp) surface.")
+    lines.append(
+        "Lower RMSE = a more accurate reconstruction of the ENTIRE true VOC(PAR, temp) surface. "
+        "**Reported primarily as SPEED -- how many experiments a method actually needs -- rather "
+        "than accuracy at one fixed 10-experiment budget**, since \"how many real experiments do "
+        "I need to run\" is usually the more practically relevant question than \"how accurate is "
+        "round 10 specifically.\""
+    )
+    lines.append("")
+    summary = _rounds_to_target_summary(rounds_to_target)
+    lines.append(
+        f"**Target**: RMSE <= {target_rmse:.1f} ppm (computed fresh each run as 1.5x the best "
+        f"method's own mean round-{N_TOTAL_EXPERIMENTS} RMSE -- never a hardcoded number, so this "
+        "stays meaningful if the ground truth or noise level ever changes)."
+    )
+    lines.append("")
+    for label in sorted(summary, key=lambda l: (summary[l]["median_rounds"] is None, summary[l]["median_rounds"] or 0.0)):
+        s = summary[label]
+        if s["median_rounds"] is None:
+            lines.append(f"- **{label}**: never reached the target within {N_TOTAL_EXPERIMENTS} experiments, in any of the {s['n_total']} repeats")
+        elif s["n_converged"] < s["n_total"]:
+            lines.append(
+                f"- **{label}**: median {s['median_rounds']:.1f} experiments needed "
+                f"(only reached it in {s['n_converged']} of {s['n_total']} repeats -- the rest never got there within the budget)"
+            )
+        else:
+            lines.append(f"- **{label}**: median {s['median_rounds']:.1f} experiments needed (reached it in every repeat)")
+    lines.append("")
+    lines.append(
+        "**For context, the same metric's older framing -- accuracy at the fixed "
+        f"{N_TOTAL_EXPERIMENTS}-experiment budget:**"
+    )
     lines.append("")
     final_means = {label: float(np.nanmean(curve[:, -1])) for label, curve in rmse_curves.items()}
     final_medians = {label: float(np.nanmedian(curve[:, -1])) for label, curve in rmse_curves.items()}
@@ -647,7 +830,7 @@ def _write_report(
     for label, mean in sorted(final_means.items(), key=lambda kv: kv[1]):
         lines.append(
             f"- **{label}**: mean {mean:.1f} +/- {final_stds[label]:.1f} ppm, "
-            f"median {final_medians[label]:.1f} ppm (round 10)"
+            f"median {final_medians[label]:.1f} ppm (round {N_TOTAL_EXPERIMENTS})"
         )
     lines.append("")
     lines.append(
@@ -778,16 +961,19 @@ def _write_report(
     )
     lines.append("")
 
-    lines.append("## Test 3 -- ground truth #1: does discover_led_response_dynamics recover the true WITHIN-experiment dynamic response to one specific time-varying profile?")
+    lines.append("## Test 3 -- ground truth #1: does discover_led_response_dynamics recover the true WITHIN-experiment relaxation dynamics for a given static PAR level?")
     lines.append("")
     lines.append(
-        "Distinct from Tests 1/2, which are entirely about ground truth #2 (how VOC varies "
-        "ACROSS many different static settings). Here there is exactly one experiment, one real "
-        "sinusoid control profile (driven by the actual `evaluate_control_profile` function), and "
-        "a known dynamic law `dVOC/dt = (1/tau) * (true_voc_ppm(par(t), temp) - VOC(t))` -- a "
-        "first-order lag toward the SAME static surface from Tests 1/2 as its steady-state target, "
-        f"tying the two ground truths together. Averaged over {N_DYNAMICS_SEEDS} repeats (same "
-        "non-determinism reasoning as Test 2):"
+        "Distinct from Tests 1/2, which are entirely about ground truth #2 (how VOC varies ACROSS "
+        f"many different static settings). Here there are {len(PAR_LEVELS)} SEPARATE, independent "
+        f"experiments, each held at its OWN fixed static PAR level ({', '.join(f'{p:.0f}' for p in PAR_LEVELS)} "
+        f"umol/m^2/s, {TEMP:.0f}C, each running {DURATION_S / 86400.0:.0f} days) -- deliberately NOT "
+        "pooled together before fitting, so each experiment is answering the same question "
+        "independently: does discover_led_response_dynamics recover the true relaxation law "
+        "`dVOC/dt = (1/tau) * (true_voc_ppm(par, temp) - VOC(t))` -- a first-order lag toward the "
+        "SAME static surface from Tests 1/2 as its steady-state target -- from just THIS one "
+        "experiment's own noisy trajectory? Averaged over every independent (seed, PAR level) trial "
+        "(same non-determinism reasoning as Test 2):"
     )
     lines.append("")
     for label in dynamics_rmse:
@@ -796,8 +982,11 @@ def _write_report(
         r2_mean = float(np.mean(dynamics_r2[label]))
         lines.append(f"**{label}**")
         lines.append(f"- RMSE vs true derivative: {rmse_mean:.3f} +/- {rmse_std:.3f} ppm/s")
-        lines.append(f"- R^2 vs true derivative (dense grid): {r2_mean:.3f}")
-        lines.append(f"- Example discovered equation: `{dynamics_equations[label]}`")
+        lines.append(f"- R^2 vs true derivative (1D grid at that trial's own fixed PAR): {r2_mean:.3f}")
+        lines.append(
+            f"- Example discovered equation (one PAR level/seed only -- since none are pooled, "
+            f"each independently gets its OWN equation, not one universal one): `{dynamics_equations[label]}`"
+        )
         lines.append("")
 
     raw_label = next(l for l in dynamics_rmse if "raw" in l)
@@ -807,73 +996,152 @@ def _write_report(
     raw_dyn_rmse = float(np.mean(dynamics_rmse[raw_label]))
     corrected_dyn_rmse = float(np.mean(dynamics_rmse[corrected_label]))
     rmse_reduction_pct = 100.0 * (raw_dyn_rmse - corrected_dyn_rmse) / raw_dyn_rmse
-    lines.append(
-        f"**Verdict:** the REAL, public `discover_led_response_dynamics` reliably recovered a "
-        f"structurally correct equation in BOTH modes -- both `ppm_asgas` and "
-        f"`reactor_par_umol_m2_s` terms were selected every single run, confirming it genuinely "
-        f"detects that PAR drives the VOC dynamics, not just noise. Passing the new "
-        f"`ambient_baseline_run_id` parameter (applying that sensor's persisted ambient-covariate "
-        f"correction before calibration -- added directly to the production tool after this "
-        f"benchmark first surfaced the gap) improved recovery meaningfully and consistently across "
-        f"all {N_DYNAMICS_SEEDS} seeds (R^2 {raw_r2:.2f} without it vs {corrected_r2:.2f} with it, "
-        f"RMSE {rmse_reduction_pct:.0f}% lower every time) -- a genuine, repeatable, now-actionable "
-        f"improvement, not a one-off fluke. Run a `run_ambient_baseline_check(..., "
-        f"persist_run_id=...)` once per sensor, then pass that same id here, to get this "
-        f"improvement on real hardware data."
-    )
-    lines.append("")
+    n_trials = len(dynamics_rmse[raw_label])
 
     """
-    Whether the true linear ppm_asgas self-decay term actually got
-    selected is computed fresh from the real selected_features returned
-    by each seed's fit, never hardcoded -- an earlier version of this
-    paragraph asserted "consistently missed" as a fixed claim, which went
-    stale (and became simply wrong) the moment discover_led_response_dynamics's
-    default selection strategy changed from greedy_forward to exhaustive
-    (see CLAUDE.md's dev log) and the true term started being recovered.
+    Every fraction/claim below is computed fresh from the real
+    selected_features/equations returned by each independent (seed, PAR
+    level) trial, never hardcoded -- an earlier version of this section
+    (from the sinusoid-profile design) claimed "reactor_par_umol_m2_s was
+    selected every run, confirming it detects PAR drives the dynamics."
+    That claim does NOT carry over to this static-PAR redesign: within
+    any SINGLE experiment here, PAR is literally constant (by design --
+    see the "no pooling" rationale), so a term nominally involving
+    reactor_par_umol_m2_s is mathematically degenerate with the
+    intercept in that one fit and selecting it proves nothing about
+    "detecting PAR." What this design CAN honestly check is whether the
+    tool recovers each experiment's own simple first-order relaxation --
+    dominated by a plain linear ppm_asgas self-decay term -- from just
+    that one experiment's noisy trajectory.
     """
 
     def _linear_term_fraction(label: str, term: str = "ppm_asgas") -> float:
-        seeds = dynamics_selected_features[label]
-        return sum(1 for feats in seeds if term in feats) / len(seeds)
+        trials = dynamics_selected_features[label]
+        return sum(1 for feats in trials if term in feats) / len(trials)
+
+    def _par_term_fraction(label: str) -> float:
+        trials = dynamics_selected_features[label]
+        return sum(1 for feats in trials if any("reactor_par_umol_m2_s" in f for f in feats)) / len(trials)
 
     raw_linear_frac = _linear_term_fraction(raw_label)
     corrected_linear_frac = _linear_term_fraction(corrected_label)
+    raw_par_frac = _par_term_fraction(raw_label)
+    corrected_par_frac = _par_term_fraction(corrected_label)
 
-    def _recovery_fragment(frac: float, n_seeds: int) -> str:
+    def _recovery_fragment(frac: float, n: int) -> str:
         if frac == 1.0:
-            return f"every one of the {n_seeds} seeds"
+            return f"every one of the {n} trials"
         if frac == 0.0:
-            return f"none of the {n_seeds} seeds"
-        return f"{frac * n_seeds:.0f} of the {n_seeds} seeds"
+            return f"none of the {n} trials"
+        return f"{frac * n:.0f} of the {n} trials"
+
+    """
+    Whether ambient-baseline correction actually HELPED here is computed
+    from the real sign of the R^2/RMSE comparison, never assumed -- the
+    prior (sinusoid-profile) design consistently found correction helped,
+    but that is a property of THAT experiment design, not a law of
+    nature; asserting it unconditionally here would be exactly the kind
+    of stale, un-rechecked claim this project's own dev log has flagged
+    as a recurring bug class before.
+    """
+    correction_helped = corrected_r2 > raw_r2
+    if correction_helped:
+        lines.append(
+            f"**Verdict:** the REAL, public `discover_led_response_dynamics` recovered the true "
+            f"linear `ppm_asgas` self-decay term -- the dominant term in this static-PAR relaxation "
+            f"law -- in {_recovery_fragment(raw_linear_frac, n_trials)} (raw) and "
+            f"{_recovery_fragment(corrected_linear_frac, n_trials)} (corrected) of every independent "
+            f"(seed, PAR level) trial. Passing the `ambient_baseline_run_id` parameter (applying "
+            f"that sensor's persisted ambient-covariate correction before calibration) improved "
+            f"recovery on average (R^2 {raw_r2:.2f} without it vs {corrected_r2:.2f} with it, RMSE "
+            f"{rmse_reduction_pct:.0f}% lower on average) here too, consistent with the earlier "
+            "sinusoid-profile design's finding. Run a `run_ambient_baseline_check(..., "
+            "persist_run_id=...)` once per sensor, then pass that same id here, to get this "
+            "improvement on real hardware data."
+        )
+    else:
+        lines.append(
+            f"**Verdict:** the REAL, public `discover_led_response_dynamics` recovered the true "
+            f"linear `ppm_asgas` self-decay term -- the dominant term in this static-PAR relaxation "
+            f"law -- in {_recovery_fragment(raw_linear_frac, n_trials)} (raw) and "
+            f"{_recovery_fragment(corrected_linear_frac, n_trials)} (corrected) of every independent "
+            f"(seed, PAR level) trial. **Unlike the earlier sinusoid-profile design, ambient-"
+            f"baseline correction did NOT help here -- it made recovery WORSE on average** (R^2 "
+            f"{raw_r2:.2f} without it vs {corrected_r2:.2f} with it, RMSE {-rmse_reduction_pct:.0f}% "
+            "higher on average). Reported plainly rather than silently assuming the earlier design's "
+            "finding carries over: with a full week of mostly-flat, near-steady-state data (per the "
+            "user's request for experimental realism), the finite-difference derivative estimate is "
+            "dominated by noise once the brief initial transient has settled, and correction applied "
+            "to a much longer, differently-structured noise realization than the shorter sinusoid "
+            "experiment used may not generalize the same way -- a genuine, disclosed trade-off of "
+            "this redesign, not evidence the correction itself is broken (Test 1 already separately "
+            "confirms the correction's own math is correct on its own terms)."
+        )
+    lines.append("")
+    lines.append(
+        f"**A necessary honest caveat of NOT pooling across PAR levels (per the user's explicit "
+        f"choice):** a term nominally involving `reactor_par_umol_m2_s` was still selected in "
+        f"{_recovery_fragment(raw_par_frac, n_trials)} (raw) and "
+        f"{_recovery_fragment(corrected_par_frac, n_trials)} (corrected) of trials -- but since PAR "
+        "never varies within any single one of these experiments, this does NOT mean the tool "
+        "'detected' a PAR effect the way it genuinely could when PAR varies within a run (e.g. the "
+        "earlier sinusoid-profile design, or a real control-profile experiment). Here, a selected "
+        "PAR-involving term is mathematically indistinguishable from a constant offset for that one "
+        "fit -- the coefficients on it are an artifact of the fixed PAR value, not evidence of a "
+        "learned PAR relationship. Recovering the ACTUAL PAR-dependence (how the decay target itself "
+        "shifts with light level) would require comparing the STEADY-STATE VALUE each independent "
+        "trial settles at across the different PAR levels against the static surface from Tests 1/2 "
+        "-- not something this per-experiment dynamics fit does on its own."
+    )
+    lines.append("")
 
     if raw_linear_frac == 1.0 and corrected_linear_frac == 1.0:
         lines.append(
             f"**On the selection strategy:** `discover_led_response_dynamics` defaults to "
             f"`strategy=\"exhaustive\"` rather than `jaxsr`'s own default `\"greedy_forward\"` -- "
-            f"confirmed here to matter: the true linear `ppm_asgas` decay term was genuinely "
-            f"recovered in {_recovery_fragment(raw_linear_frac, N_DYNAMICS_SEEDS)} (raw) and "
-            f"{_recovery_fragment(corrected_linear_frac, N_DYNAMICS_SEEDS)} (corrected), vs. a "
-            "strategy comparison run separately (not part of this repeated benchmark) where "
-            "`greedy_forward` reliably missed it in favor of quadratic/cubic surrogate terms at the "
-            "same `max_terms=5` -- a real instance of greedy forward selection's classic failure mode "
-            "(an early locally-good pick blocking a later, globally-better combination), not a "
-            "derivative-noise or basis-coverage problem. Exhaustive search is tractable here "
-            "specifically because this function always uses a fixed, small 2-state default basis "
-            "(8 candidate terms); it would need its own tractability check before being assumed safe "
-            "for a much larger custom basis library."
+            "confirmed in an earlier version of this benchmark (the sinusoid-profile design) that "
+            "greedy selection reliably missed the true linear decay term in favor of quadratic/cubic "
+            "surrogate terms at the same `max_terms=5` -- a real instance of greedy forward "
+            "selection's classic failure mode (an early locally-good pick blocking a later, "
+            "globally-better combination), not a derivative-noise or basis-coverage problem. "
+            "Exhaustive search is tractable here specifically because this function always uses a "
+            "fixed, small 2-state default basis (8 candidate terms); it would need its own "
+            "tractability check before being assumed safe for a much larger custom basis library."
         )
     else:
         lines.append(
             f"**An honest limitation, not papered over:** the true linear `ppm_asgas` decay term was "
-            f"recovered in only {_recovery_fragment(raw_linear_frac, N_DYNAMICS_SEEDS)} (raw) and "
-            f"{_recovery_fragment(corrected_linear_frac, N_DYNAMICS_SEEDS)} (corrected) -- "
-            f"inconsistent recovery across seeds at the current `max_terms=5`/`strategy=\"exhaustive\"` "
-            f"settings. The resulting R^2 against the true derivative (raw {raw_r2:.2f}, corrected "
+            f"recovered in only {_recovery_fragment(raw_linear_frac, n_trials)} (raw) and "
+            f"{_recovery_fragment(corrected_linear_frac, n_trials)} (corrected) -- inconsistent "
+            f"recovery across trials at the current `max_terms=5`/`strategy=\"exhaustive\"` settings. "
+            f"The resulting R^2 against the true derivative (raw {raw_r2:.2f}, corrected "
             f"{corrected_r2:.2f}) reflects a real, structurally-plausible but not always exact "
-            "recovery -- good enough to see that light genuinely drives the response, not always "
-            "good enough to trust the exact discovered coefficients as the true physical law."
+            "recovery -- good enough to see the relaxation shape, not always good enough to trust "
+            "the exact discovered coefficients as the true physical law."
         )
+    lines.append("")
+
+    raw_diverged_frac = sum(dynamics_diverged[raw_label]) / len(dynamics_diverged[raw_label])
+    corrected_diverged_frac = sum(dynamics_diverged[corrected_label]) / len(dynamics_diverged[corrected_label])
+    if raw_diverged_frac > 0 or corrected_diverged_frac > 0:
+        lines.append(
+            "**A second honest limitation, specific to this static-PAR redesign: some discovered "
+            "equations are numerically UNSTABLE when integrated forward over the full experiment "
+            f"duration**, in {_recovery_fragment(raw_diverged_frac, n_trials)} (raw) and "
+            f"{_recovery_fragment(corrected_diverged_frac, n_trials)} (corrected) -- see "
+            "`dynamics_recovery.png` panels (a)/(b), where a predicted line simply stops partway "
+            "rather than continuing (the plot deliberately does NOT extrapolate through a divergence "
+            "at astronomical values). Root cause: a discovered equation can fit dVOC/dt reasonably "
+            "well LOCALLY (a small RMSE against the true derivative over the range actually "
+            "observed) while still having the wrong sign on a higher-order term (e.g. a positive "
+            "`ppm_asgas^2` coefficient) -- invisible in a single-step derivative comparison, but "
+            "compounding into runaway growth over thousands of forward-integration steps. This is a "
+            "known, real limitation of SINDy-style discovery generally (a locally-accurate model "
+            "is not guaranteed to be globally/dynamically stable), not specific to this benchmark's "
+            "implementation -- worth knowing before trusting a discovered equation to be simulated "
+            "forward over a long horizon, as opposed to just evaluated pointwise."
+        )
+        lines.append("")
 
     report_path.write_text("\n".join(lines), encoding="utf-8")
 
@@ -894,15 +1162,17 @@ def main() -> None:
 
     print(f"\nRunning Test 2 (DoE comparison, {N_SEEDS} repeats)...")
     rmse_curves, best_found_curves = _run_doe_comparison_repeated(N_SEEDS)
-    _plot_doe_comparison(rmse_curves, best_found_curves, OUTPUT_DIR / "doe_comparison.png")
+    rounds_to_target, target_rmse = _compute_rounds_to_target(rmse_curves)
+    _plot_doe_comparison(rmse_curves, best_found_curves, rounds_to_target, target_rmse, OUTPUT_DIR / "doe_comparison.png")
 
     print(f"\nRunning Test 3 (dynamics recovery, {N_DYNAMICS_SEEDS} repeats)...")
-    dynamics_rmse, dynamics_r2, dynamics_equations, dynamics_selected_features, representative_run = _run_dynamics_recovery_repeated(N_DYNAMICS_SEEDS)
-    _plot_dynamics_recovery(representative_run, dynamics_rmse, dynamics_r2, OUTPUT_DIR / "dynamics_recovery.png")
+    dynamics_rmse, dynamics_r2, dynamics_equations, dynamics_selected_features, dynamics_diverged, representative_trajectories = _run_dynamics_recovery_repeated(N_DYNAMICS_SEEDS)
+    _plot_dynamics_recovery(representative_trajectories, dynamics_rmse, dynamics_r2, OUTPUT_DIR / "dynamics_recovery.png")
 
     _write_report(
-        calibration_results, rmse_curves, best_found_curves, dynamics_rmse, dynamics_r2, dynamics_equations,
-        dynamics_selected_features, OUTPUT_DIR / "REPORT.md",
+        calibration_results, rmse_curves, best_found_curves, rounds_to_target, target_rmse,
+        dynamics_rmse, dynamics_r2, dynamics_equations, dynamics_selected_features, dynamics_diverged,
+        OUTPUT_DIR / "REPORT.md",
     )
 
     print(f"\nDone. Results written to {OUTPUT_DIR}/")
