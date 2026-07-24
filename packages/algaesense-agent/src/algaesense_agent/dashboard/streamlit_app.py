@@ -356,18 +356,25 @@ def _slack_panel() -> None:
     # typed directly in Slack.
     try:
         history = client.conversations_history(channel=channel_id, limit=20)
-        for message in reversed(history["messages"]):
-            sender = message.get("user", message.get("bot_id", "unknown"))
-            st.markdown(f"**{sender}**: {message.get('text', '')}")
     except Exception as exc:
         st.error(f"Failed to load Slack history: {exc}")
         return
 
-    message_text = st.text_input("Message to the agent", key="slack_message_input")
-    if st.button("Send") and message_text:
+    # st.chat_message/st.chat_input give real chat-bubble styling and a
+    # fixed input bar for free -- this is still the same custom panel
+    # reading/writing the real Slack API underneath, just rendered with
+    # Streamlit's own chat components instead of plain markdown lines, so
+    # it reads like an actual conversation rather than a log.
+    with st.container(height=400):
+        for message in reversed(history["messages"]):
+            is_bot = "bot_id" in message
+            with st.chat_message("assistant" if is_bot else "user", avatar="🤖" if is_bot else "🧑"):
+                st.markdown(message.get("text", ""))
+
+    message_text = st.chat_input("Message to the agent")
+    if message_text:
         try:
             client.chat_postMessage(channel=channel_id, text=message_text)
-            st.success("Sent.")
         except Exception as exc:
             st.error(f"Failed to send: {exc}")
 
