@@ -256,7 +256,9 @@ def start(
             ~1 Hz VOC sampling.
             """
             stop_event.wait(1.0)
+        click.echo("acquisition_loop: stop_event set, flushing writers...")
         service.close()
+        click.echo("acquisition_loop: writers flushed, thread exiting.")
 
     acquisition_thread = threading.Thread(target=acquisition_loop, daemon=True)
     acquisition_thread.start()
@@ -268,8 +270,10 @@ def start(
         """
         uvicorn.run(create_app(state), host=host, port=port)
     finally:
+        click.echo("uvicorn.run() returned, signaling acquisition thread to stop...")
         stop_event.set()
         acquisition_thread.join(timeout=5.0)
+        click.echo(f"acquisition_thread.join() returned, still alive={acquisition_thread.is_alive()}")
 
 
 @cli.command("scan-i2c")
