@@ -291,10 +291,29 @@ def _hermes_env_values() -> dict[str, str]:
     return values
 
 
+# Confirmed against a real installed Hermes on 2026-07-25: not every
+# `hermes config set` key lands in .env -- SLACK_HOME_CHANNEL and
+# SLACK_FREE_RESPONSE_CHANNELS turned up as flat top-level string keys in
+# config.yaml instead (mixed in alongside the nested mcp_servers: block),
+# not under a slack: sub-key. Checking both files, in this order, is what
+# actually finds a given key rather than assuming .env alone is enough.
+def _hermes_config_values() -> dict[str, str]:
+    path = _hermes_env_path().parent / "config.yaml"
+    if not path.exists():
+        return {}
+    import yaml
+
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError:
+        return {}
+    return {k: v for k, v in data.items() if isinstance(v, str)}
+
+
 def _slack_env(key: str) -> str | None:
     # OS environment always wins, so an explicit override still works even
-    # if Hermes's own file has a different value.
-    return os.environ.get(key) or _hermes_env_values().get(key)
+    # if Hermes's own files have a different value.
+    return os.environ.get(key) or _hermes_env_values().get(key) or _hermes_config_values().get(key)
 
 
 def _slack_client():
