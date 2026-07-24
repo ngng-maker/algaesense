@@ -265,8 +265,40 @@ def _past_experiment_readings() -> None:
     _render_readings(voc_rows, camera_rows)
 
 
+# Hermes's own secrets file -- `hermes config set SLACK_BOT_TOKEN ...` writes
+# plain KEY=VALUE lines here, at ~/.hermes/.env (or %LOCALAPPDATA%/hermes/.env
+# on Windows -- see docs/slack_and_hermes_setup.md). Reusing it directly means
+# this dashboard doesn't need the same Slack values duplicated as separate OS
+# environment variables just to run Streamlit.
+def _hermes_env_path() -> Path:
+    if os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
+        return base / "hermes" / ".env"
+    return Path.home() / ".hermes" / ".env"
+
+
+def _hermes_env_values() -> dict[str, str]:
+    path = _hermes_env_path()
+    if not path.exists():
+        return {}
+    values: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        values[key.strip()] = value.strip().strip("'\"")
+    return values
+
+
+def _slack_env(key: str) -> str | None:
+    # OS environment always wins, so an explicit override still works even
+    # if Hermes's own file has a different value.
+    return os.environ.get(key) or _hermes_env_values().get(key)
+
+
 def _slack_client():
-    token = os.environ.get("SLACK_BOT_TOKEN")
+    token = _slack_env("SLACK_BOT_TOKEN")
     if not token:
         return None
 
@@ -279,15 +311,23 @@ def _slack_client():
 def _slack_panel() -> None:
     st.subheader("Chat with the AI agent (Slack)")
 
-    channel_id = os.environ.get("SLACK_CHANNEL_ID")
+    # SLACK_CHANNEL_ID lets this dashboard watch a channel other than
+    # Hermes's own home channel; falls back to SLACK_HOME_CHANNEL (the key
+    # Hermes itself uses, see docs/slack_and_hermes_setup.md) since that's
+    # the channel an operator is actually chatting with it in, in the
+    # common case where there's only one.
+    channel_id = _slack_env("SLACK_CHANNEL_ID") or _slack_env("SLACK_HOME_CHANNEL")
     client = _slack_client()
 
     if client is None or not channel_id:
         st.info(
-            "Slack isn't configured yet. Set the SLACK_BOT_TOKEN and "
-            "SLACK_CHANNEL_ID environment variables before starting this "
-            "app -- see profile/README.md for how to create the Slack app "
-            "and get both values."
+            "Slack isn't configured yet. Set SLACK_BOT_TOKEN and either "
+            "SLACK_CHANNEL_ID or SLACK_HOME_CHANNEL as environment variables "
+            "-- or configure Slack for Hermes itself (`hermes config set "
+            "SLACK_BOT_TOKEN ...` / `SLACK_HOME_CHANNEL ...`), which this "
+            "dashboard reads automatically if OS environment variables "
+            "aren't set. See profile/README.md for how to create the Slack "
+            "app and get both values."
         )
         return
 
