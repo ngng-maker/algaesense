@@ -19,6 +19,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 """
 Makes this file's own sibling import below (ground_truth) resolve regardless
@@ -35,11 +36,15 @@ from ground_truth import (
     AmbientCovariateTruth,
     NoiseConfig,
     SensorCalibrationTruth,
+    curvy_drift_artifact_mv,
     generate_ambient_blank_recording,
     generate_calibration_recording,
     generate_common_mode_check_recording,
+    generate_cross_sensor_consistency_recording,
     generate_experiment_recording,
+    sluggish_flat_artifact_mv,
     true_voc_ppm,
+    zigzag_rising_artifact_mv,
 )
 
 from jaxsr_calibration.calibration.apply import apply_calibration, persist_calibration
@@ -60,6 +65,23 @@ TRUE_CALIBRATION = {
 }
 
 CALIBRATION_RUN_ID = "benchmark_cal_01"
+
+CROSS_SENSOR_PAR = 250.0
+CROSS_SENSOR_TEMP = 30.0
+CROSS_SENSOR_DURATION_S = 600
+CROSS_SENSOR_REACTOR_ID = "R_cross_sensor"
+"""A mid-domain (PAR, temp) point all 3 sensors observe SIMULTANEOUSLY,
+each with its own distinct systematic-drift artifact -- see
+ground_truth.py's artifact functions and generate_cross_sensor_consistency_recording
+for why this checks a genuinely different question from the rest of
+Test 1 (does correction make different-LOOKING sensors agree with each
+other and with the truth, not just recover a single sensor's own true
+value)."""
+CROSS_SENSOR_ARTIFACT_SHAPES: dict[str, tuple[str, Callable[[np.ndarray], np.ndarray]]] = {
+    "PID01": ("sluggish/flat", sluggish_flat_artifact_mv),
+    "PID02": ("zigzag-rising", zigzag_rising_artifact_mv),
+    "PID03": ("curvy drift", curvy_drift_artifact_mv),
+}
 
 
 def _true_voc_curve_form(xy, vmax, k_m, temp_slope, gamma, photo_k, baseline):
@@ -128,7 +150,120 @@ def _fit_and_score(par_values: np.ndarray, temp_values: np.ndarray, ppm_values: 
     )
 
 
-def run_calibration_recovery_test(seed: int = 0, verbose: bool = True) -> dict[str, RecoveryResult]:
+@dataclass
+class CrossSensorConsistencyResult:
+    """Three sensors observing the EXACT SAME (par, temp) condition
+    simultaneously, each carrying its own distinct systematic-drift
+    artifact -- checks whether the correction pipeline makes different-
+    LOOKING sensors agree with EACH OTHER (cross_sensor_spread) and with
+    the TRUE value (rmse_vs_true), not just whether it recovers one
+    sensor's own reading correctly."""
+
+    par: float
+    temp: float
+    true_ppm: float
+    t: list[float]
+    shapes: dict[str, str]
+    raw_ppm: dict[str, list[float]]
+    corrected_ppm: dict[str, list[float]]
+    raw_cross_sensor_spread: float
+    corrected_cross_sensor_spread: float
+    raw_rmse_vs_true: dict[str, float]
+    corrected_rmse_vs_true: dict[str, float]
+
+
+def run_cross_sensor_consistency_test(
+    calibration_dir: Path, covariate_models: dict, seed: int, verbose: bool = True,
+) -> CrossSensorConsistencyResult:
+    """Reuses the SAME already-fitted calibration/covariate models the
+    rest of Test 1 fits (passed in, not refit) -- this sub-test isn't
+    about whether calibration/covariate fitting works (already checked
+    elsewhere), it's specifically about whether applying that already-
+    correct correction to THREE DIFFERENTLY-SHAPED raw traces of the
+    SAME true value makes them converge, or leaves a real residual
+    difference between sensors."""
+    noise = NoiseConfig(ambient=AmbientCovariateTruth())
+    artifact_fns = {sid: fn for sid, (_, fn) in CROSS_SENSOR_ARTIFACT_SHAPES.items()}
+    readings = generate_cross_sensor_consistency_recording(
+        experiment_id="exp_cross_sensor",
+        reactor_id=CROSS_SENSOR_REACTOR_ID,
+        sensor_ids=SENSOR_IDS,
+        calibration_truth=TRUE_CALIBRATION,
+        noise=noise,
+        par=CROSS_SENSOR_PAR,
+        temp=CROSS_SENSOR_TEMP,
+        artifact_mv_fns=artifact_fns,
+        duration_s=CROSS_SENSOR_DURATION_S,
+        seed=seed,
+    )
+
+    true_ppm = float(true_voc_ppm(CROSS_SENSOR_PAR, CROSS_SENSOR_TEMP))
+    t_values: list[float] | None = None
+    raw_ppm: dict[str, list[float]] = {}
+    corrected_ppm: dict[str, list[float]] = {}
+    raw_rmse: dict[str, float] = {}
+    corrected_rmse: dict[str, float] = {}
+
+    for sensor_id in SENSOR_IDS:
+        sensor_df = readings.filter(pl.col("sensor_id") == sensor_id)
+        if t_values is None:
+            t0 = sensor_df["timestamp"][0]
+            t_values = [(ts - t0).total_seconds() for ts in sensor_df["timestamp"]]
+
+        raw_series, _, _ = apply_calibration(
+            sensor_df["pid_voltage_mv"], sensor_id, sensor_df["sample_t_c"], sensor_df["sample_rh_pct"],
+            CALIBRATION_RUN_ID, data_dir=calibration_dir,
+        )
+        raw_ppm[sensor_id] = [float(v) for v in raw_series]
+        raw_rmse[sensor_id] = float(np.sqrt(np.mean((raw_series.to_numpy() - true_ppm) ** 2)))
+
+        corrected_df = apply_covariate_correction(sensor_df, covariate_models)
+        corrected_series, _, _ = apply_calibration(
+            corrected_df["pid_voltage_mv_covariate_corrected"], sensor_id, corrected_df["sample_t_c"],
+            corrected_df["sample_rh_pct"], CALIBRATION_RUN_ID, data_dir=calibration_dir,
+        )
+        corrected_ppm[sensor_id] = [float(v) for v in corrected_series]
+        corrected_rmse[sensor_id] = float(np.sqrt(np.mean((corrected_series.to_numpy() - true_ppm) ** 2)))
+
+    """
+    Cross-sensor spread: at each timestamp, the standard deviation ACROSS
+    the 3 sensors' readings (not vs. the true value) -- averaged over the
+    whole window. This is "do the sensors agree with EACH OTHER,"
+    distinct from raw_rmse/corrected_rmse ("does each sensor agree with
+    the truth").
+    """
+    raw_matrix = np.array([raw_ppm[sid] for sid in SENSOR_IDS])
+    corrected_matrix = np.array([corrected_ppm[sid] for sid in SENSOR_IDS])
+    raw_spread = float(np.mean(np.std(raw_matrix, axis=0)))
+    corrected_spread = float(np.mean(np.std(corrected_matrix, axis=0)))
+
+    if verbose:
+        print(f"  cross-sensor spread (ppm, std across sensors, averaged over time): raw={raw_spread:.2f}, corrected={corrected_spread:.2f}")
+        for sensor_id in SENSOR_IDS:
+            shape_name, _ = CROSS_SENSOR_ARTIFACT_SHAPES[sensor_id]
+            print(
+                f"  cross-sensor[{sensor_id}, {shape_name}]: raw RMSE vs true={raw_rmse[sensor_id]:.2f}, "
+                f"corrected RMSE vs true={corrected_rmse[sensor_id]:.2f}"
+            )
+
+    return CrossSensorConsistencyResult(
+        par=CROSS_SENSOR_PAR,
+        temp=CROSS_SENSOR_TEMP,
+        true_ppm=true_ppm,
+        t=t_values or [],
+        shapes={sid: name for sid, (name, _) in CROSS_SENSOR_ARTIFACT_SHAPES.items()},
+        raw_ppm=raw_ppm,
+        corrected_ppm=corrected_ppm,
+        raw_cross_sensor_spread=raw_spread,
+        corrected_cross_sensor_spread=corrected_spread,
+        raw_rmse_vs_true=raw_rmse,
+        corrected_rmse_vs_true=corrected_rmse,
+    )
+
+
+def run_calibration_recovery_test(
+    seed: int = 0, verbose: bool = True,
+) -> tuple[dict[str, RecoveryResult], CrossSensorConsistencyResult]:
     with tempfile.TemporaryDirectory() as tmp:
         data_dir = Path(tmp)
         calibration_dir = data_dir / "derived" / "calibrations" / "standard_addition"
@@ -217,6 +352,19 @@ def run_calibration_recovery_test(seed: int = 0, verbose: bool = True) -> dict[s
             print(f"  common-mode residual std before removal: {before_std:.2f} mV, after: {after_std:.2f} mV")
 
         """
+        Step 3.5 -- cross-sensor consistency: all 3 sensors observe the
+        SAME (PAR, temp) condition simultaneously, each with its own
+        distinct systematic-drift shape (flat/zigzag/curvy), reusing the
+        SAME calibration/covariate models just fitted above. Checks a
+        genuinely different question from the rest of Test 1: does
+        correction make different-LOOKING sensors agree with each other
+        and with the truth, not just recover one sensor's own value.
+        """
+        cross_sensor_result = run_cross_sensor_consistency_test(
+            calibration_dir, covariate_models, seed=seed + 4, verbose=verbose,
+        )
+
+        """
         Step 4 -- experiments spanning the (PAR, temp) domain, each
         contaminated with the ambient covariate nuisance and AR(1) noise
         (see NoiseConfig's docstring for why common-mode isn't layered
@@ -279,14 +427,22 @@ def run_calibration_recovery_test(seed: int = 0, verbose: bool = True) -> dict[s
         )
         corrected_result.label = "corrected (ambient-baseline applied)"
 
-        return {"raw": raw_result, "corrected": corrected_result}
+        return {"raw": raw_result, "corrected": corrected_result}, cross_sensor_result
 
 
 if __name__ == "__main__":
-    results = run_calibration_recovery_test()
+    results, cross_sensor = run_calibration_recovery_test()
     for key, result in results.items():
         print(f"\n{result.label}:")
         print(f"  RMSE vs true VOC (ppm): {result.rmse_vs_true_ppm:.2f}")
         print(f"  R^2 of recovered curve vs true surface: {result.r2_on_dense_grid:.4f}")
         for name, err in result.param_pct_error.items():
             print(f"  {name} recovered={result.recovered_params[name]:.4f}, pct_error={err:.1f}%")
+
+    print(f"\nCross-sensor consistency (PAR={cross_sensor.par}, temp={cross_sensor.temp}, true={cross_sensor.true_ppm:.1f} ppm):")
+    print(f"  cross-sensor spread: raw={cross_sensor.raw_cross_sensor_spread:.2f} ppm, corrected={cross_sensor.corrected_cross_sensor_spread:.2f} ppm")
+    for sensor_id, shape in cross_sensor.shapes.items():
+        print(
+            f"  {sensor_id} ({shape}): raw RMSE vs true={cross_sensor.raw_rmse_vs_true[sensor_id]:.2f}, "
+            f"corrected RMSE vs true={cross_sensor.corrected_rmse_vs_true[sensor_id]:.2f}"
+        )

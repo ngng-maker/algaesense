@@ -29,7 +29,12 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from calibration_recovery import TRUE_CALIBRATION, run_calibration_recovery_test
+from calibration_recovery import (
+    CROSS_SENSOR_ARTIFACT_SHAPES,
+    CROSS_SENSOR_DURATION_S,
+    TRUE_CALIBRATION,
+    run_calibration_recovery_test,
+)
 from doe_comparison import (
     MEASUREMENT_NOISE_SIGMA_PPM,
     N_EXTRA,
@@ -327,6 +332,44 @@ def _plot_calibration_recovery(results: dict, output_path: Path) -> None:
     plt.close(fig)
 
 
+def _plot_cross_sensor_consistency(result, output_path: Path) -> None:
+    """Two panels -- (a) RAW, (b) CORRECTED -- each overlaying all 3
+    sensors' ppm trace over time (one color per sensor, fixed order)
+    against a dashed reference line at the true value. All 3 sensors are
+    observing the EXACT SAME (PAR, temp) condition, so in an ideal world
+    every colored line would sit exactly on the dashed true-value line in
+    BOTH panels -- how far short of that the RAW panel falls (three
+    visibly different shapes: flat/zigzag/curvy) vs. how much closer
+    the CORRECTED panel gets is the entire point of this chart."""
+    fig, axes = plt.subplots(1, 2, figsize=(15, 5.5))
+
+    sensor_colors = {sid: PALETTE[i % len(PALETTE)] for i, sid in enumerate(result.shapes.keys())}
+    t_minutes = np.array(result.t) / 60.0
+
+    for panel_idx, (ax, ppm_dict, title) in enumerate([
+        (axes[0], result.raw_ppm, "(a) Raw (uncorrected voltage)"),
+        (axes[1], result.corrected_ppm, "(b) Corrected (ambient-baseline applied)"),
+    ]):
+        for sensor_id, shape_name in result.shapes.items():
+            ax.plot(
+                t_minutes, ppm_dict[sensor_id], color=sensor_colors[sensor_id], linewidth=1.8,
+                label=f"{sensor_id} ({shape_name})", alpha=0.9,
+            )
+        ax.axhline(result.true_ppm, color=TRUE_COLOR, linestyle="--", linewidth=1.5, label="True VOC (same for all 3)")
+        ax.set_xlabel("Elapsed time (minutes)")
+        ax.set_ylabel("Recovered VOC (ppm)")
+        ax.set_title(title)
+        ax.legend(loc="best", fontsize=9, framealpha=0.95)
+
+    fig.suptitle(
+        f"Test 1b — Cross-sensor consistency: 3 sensors, one shared (PAR={result.par:.0f}, temp={result.temp:.0f}°C) condition, "
+        "each with its own drift shape"
+    )
+    fig.tight_layout(rect=[0, 0, 1, 0.92])
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
+
 def _compute_rounds_to_target(rmse_curves: dict[str, np.ndarray]) -> tuple[dict[str, list[float | None]], float]:
     """For each method, the first round (1-indexed) at which that seed's
     surface-reconstruction RMSE first drops to or below a shared target
@@ -499,6 +542,7 @@ def _plot_doe_comparison(
 
 def _write_report(
     calibration_results: dict,
+    cross_sensor_result,
     rmse_curves: dict[str, np.ndarray],
     best_found_curves: dict[str, np.ndarray],
     rounds_to_target: dict[str, list],
@@ -659,6 +703,27 @@ def _write_report(
         "also literally what the raw generated data looks like."
     )
     lines.append("")
+    lines.append("### `cross_sensor_consistency.png` (Test 1b) -- 2 panels")
+    lines.append("")
+    lines.append(
+        "3 sensors, one color each (fixed across both panels), all measuring the SAME true VOC value "
+        "(the black dashed line) at the same time -- so in a perfect world every colored line would "
+        "sit exactly on that dashed line in BOTH panels."
+    )
+    lines.append(
+        "- **(a) Raw**: each sensor's own uncorrected trace over time -- deliberately built to look "
+        "visually distinct (one flat/sluggish, one jagged zigzag, one smooth curve), simulating three "
+        "real sensor-specific fault types layered on top of the same true reading."
+    )
+    lines.append(
+        "- **(b) Corrected**: the same three sensors after the real fleet-zero + ambient-baseline "
+        "correction pipeline is applied. How much closer the colored lines sit to the dashed true-"
+        "value line here, versus panel (a), is a direct visual read of whether correction actually "
+        "makes different-looking sensors agree with each other and with the truth -- the report's "
+        "own text states the exact numbers (spread before/after, per-sensor RMSE before/after) rather "
+        "than leaving it to eyeballing alone."
+    )
+    lines.append("")
     lines.append("### `doe_comparison.png` (Test 2) -- 3 panels")
     lines.append("")
     lines.append(
@@ -778,6 +843,77 @@ def _write_report(
         "lesson (check whether an 'interaction' term's linearized shape collides with a main "
         "effect's own linearization before blaming collinearity on 'inherent difficulty')."
     )
+    lines.append("")
+
+    lines.append("### Cross-sensor consistency -- do different-looking sensors converge after correction?")
+    lines.append("")
+    lines.append(
+        "A genuinely different question from the rest of Test 1 above: instead of one sensor "
+        f"observing many different (PAR, temp) settings, all {len(cross_sensor_result.shapes)} sensors "
+        f"here observe the EXACT SAME condition (PAR={cross_sensor_result.par:.0f} µmol·m⁻²·s⁻¹, "
+        f"temp={cross_sensor_result.temp:.0f}°C, true VOC={cross_sensor_result.true_ppm:.1f} ppm) "
+        "SIMULTANEOUSLY, but each carries its own distinctive systematic-drift artifact on top of "
+        "the same ambient-covariate/AR(1) noise every other recording in this benchmark uses -- "
+        "deliberately NOT the kind of contamination fleet-zero (a single constant bias) or ambient-"
+        "baseline correction (a linear RH/T relationship) are built to model:"
+    )
+    lines.append("")
+    for sensor_id, shape in cross_sensor_result.shapes.items():
+        lines.append(f"- **{sensor_id}** -- `{shape}`")
+    lines.append("")
+    lines.append(
+        "Two DISTINCT things are checked: do the sensors agree WITH EACH OTHER after correction "
+        "(cross-sensor spread), and does each one still agree with the TRUE value (RMSE vs. true) -- "
+        "a pipeline could conceivably make sensors agree with each other while all being wrong "
+        "together, or recover the true value for one sensor while leaving others far off, and these "
+        "are two different failure modes worth telling apart."
+    )
+    lines.append("")
+    spread_reduction_pct = 100.0 * (
+        cross_sensor_result.raw_cross_sensor_spread - cross_sensor_result.corrected_cross_sensor_spread
+    ) / cross_sensor_result.raw_cross_sensor_spread
+    lines.append(
+        f"**Cross-sensor spread** (standard deviation across the {len(cross_sensor_result.shapes)} sensors' "
+        f"readings at each instant, averaged over the whole window): raw = "
+        f"{cross_sensor_result.raw_cross_sensor_spread:.2f} ppm, corrected = "
+        f"{cross_sensor_result.corrected_cross_sensor_spread:.2f} ppm "
+        f"({spread_reduction_pct:+.0f}% change)."
+    )
+    lines.append("")
+    lines.append("**Per-sensor recovery vs. the true value:**")
+    lines.append("")
+    for sensor_id, shape in cross_sensor_result.shapes.items():
+        lines.append(
+            f"- **{sensor_id}** (`{shape}`): raw RMSE = {cross_sensor_result.raw_rmse_vs_true[sensor_id]:.2f} ppm, "
+            f"corrected RMSE = {cross_sensor_result.corrected_rmse_vs_true[sensor_id]:.2f} ppm"
+        )
+    lines.append("")
+
+    """
+    The verdict is computed from the actual numbers, not assumed --
+    correction could plausibly have fully closed the gap, partially
+    closed it, or (in principle) made it worse; whichever happened is
+    what gets reported.
+    """
+    residual_spread_pct_of_true = 100.0 * cross_sensor_result.corrected_cross_sensor_spread / cross_sensor_result.true_ppm
+    if cross_sensor_result.corrected_cross_sensor_spread < cross_sensor_result.raw_cross_sensor_spread * 0.15:
+        verdict = (
+            "correction very nearly eliminates the disagreement between sensors -- the pipeline's "
+            "modeled contamination (fleet-zero bias, ambient RH/T covariate) accounts for almost all "
+            "of what was making these three differently-shaped raw traces disagree."
+        )
+    else:
+        verdict = (
+            "correction reduces but does NOT eliminate the disagreement between sensors -- a real, "
+            f"honest residual of {cross_sensor_result.corrected_cross_sensor_spread:.1f} ppm "
+            f"({residual_spread_pct_of_true:.1f}% of the true value) remains even after applying "
+            "every correction this pipeline currently knows how to do. This is expected, not a bug: "
+            "the drift artifacts injected here (a sluggish lag, a periodic zigzag, a smooth exponential "
+            "curve) are a genuinely different class of contamination from the constant bias and linear "
+            "RH/T covariate the pipeline actually models and corrects for -- this sub-test exists "
+            "specifically to show that boundary honestly, not to imply the pipeline is broken."
+        )
+    lines.append(f"**Verdict:** {verdict}")
     lines.append("")
 
     lines.append("## Test 2 -- does calibration + JAXSR active learning + labwiki beat classic DoE?")
@@ -1157,8 +1293,9 @@ def main() -> None:
     OUTPUT_DIR.mkdir(exist_ok=True)
 
     print("Running Test 1 (calibration recovery)...")
-    calibration_results = run_calibration_recovery_test(verbose=True)
+    calibration_results, cross_sensor_result = run_calibration_recovery_test(verbose=True)
     _plot_calibration_recovery(calibration_results, OUTPUT_DIR / "calibration_recovery.png")
+    _plot_cross_sensor_consistency(cross_sensor_result, OUTPUT_DIR / "cross_sensor_consistency.png")
 
     print(f"\nRunning Test 2 (DoE comparison, {N_SEEDS} repeats)...")
     rmse_curves, best_found_curves = _run_doe_comparison_repeated(N_SEEDS)
@@ -1170,13 +1307,14 @@ def main() -> None:
     _plot_dynamics_recovery(representative_trajectories, dynamics_rmse, dynamics_r2, OUTPUT_DIR / "dynamics_recovery.png")
 
     _write_report(
-        calibration_results, rmse_curves, best_found_curves, rounds_to_target, target_rmse,
+        calibration_results, cross_sensor_result, rmse_curves, best_found_curves, rounds_to_target, target_rmse,
         dynamics_rmse, dynamics_r2, dynamics_equations, dynamics_selected_features, dynamics_diverged,
         OUTPUT_DIR / "REPORT.md",
     )
 
     print(f"\nDone. Results written to {OUTPUT_DIR}/")
     print("  - calibration_recovery.png")
+    print("  - cross_sensor_consistency.png")
     print("  - doe_comparison.png")
     print("  - dynamics_recovery.png")
     print("  - REPORT.md")
