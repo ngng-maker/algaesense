@@ -316,6 +316,20 @@ def _slack_env(key: str) -> str | None:
     return os.environ.get(key) or _hermes_env_values().get(key) or _hermes_config_values().get(key)
 
 
+# A message sent from this dashboard still has to go through the same bot
+# token Hermes itself uses to post its own replies -- there's no way for a
+# bot-token API call to post as the operator's own human Slack account (that
+# would need a separate, more sensitive user-level OAuth flow, not worth
+# adding just for this convenience panel). This marker distinguishes "the
+# operator relayed a message through the dashboard" from "Hermes itself
+# replied," both on the Slack side (via the username/icon_emoji override --
+# needs the app's chat:write.customize scope; without it, Slack silently
+# posts as the app's own default identity instead) and when reading history
+# back into this panel (an operator-relayed message otherwise looks
+# identical to a real Hermes reply, since both carry a bot_id).
+_DASHBOARD_RELAY_USERNAME = "Operator (via dashboard)"
+
+
 def _slack_client():
     token = _slack_env("SLACK_BOT_TOKEN")
     if not token:
@@ -360,21 +374,36 @@ def _slack_panel() -> None:
         st.error(f"Failed to load Slack history: {exc}")
         return
 
-    # st.chat_message/st.chat_input give real chat-bubble styling and a
-    # fixed input bar for free -- this is still the same custom panel
-    # reading/writing the real Slack API underneath, just rendered with
-    # Streamlit's own chat components instead of plain markdown lines, so
-    # it reads like an actual conversation rather than a log.
+    # st.chat_message gives real chat-bubble styling for free -- this is
+    # still the same custom panel reading/writing the real Slack API
+    # underneath, just rendered with Streamlit's own chat components
+    # instead of plain markdown lines, so it reads like an actual
+    # conversation rather than a log.
     with st.container(height=400):
         for message in reversed(history["messages"]):
-            is_bot = "bot_id" in message
+            is_dashboard_relay = message.get("username") == _DASHBOARD_RELAY_USERNAME
+            is_bot = "bot_id" in message and not is_dashboard_relay
             with st.chat_message("assistant" if is_bot else "user", avatar="🤖" if is_bot else "🧑"):
                 st.markdown(message.get("text", ""))
 
-    message_text = st.chat_input("Message to the agent")
-    if message_text:
+    # A form, not st.chat_input -- confirmed real problem: chat_input's
+    # special "pinned to the bottom of the page" rendering doesn't reliably
+    # trigger a rerun of the @st.fragment it's declared in (pressing Enter
+    # did nothing, no error, nothing sent). A form's Enter-to-submit works
+    # normally inside a fragment since it's just an ordinary widget, not
+    # chat_input's fixed/floating one. clear_on_submit empties the box
+    # after sending, matching chat_input's own behavior.
+    with st.form("slack_send_form", clear_on_submit=True):
+        message_text = st.text_input("Message to the agent", label_visibility="collapsed")
+        submitted = st.form_submit_button("Send")
+    if submitted and message_text:
         try:
-            client.chat_postMessage(channel=channel_id, text=message_text)
+            client.chat_postMessage(
+                channel=channel_id,
+                text=message_text,
+                username=_DASHBOARD_RELAY_USERNAME,
+                icon_emoji=":bust_in_silhouette:",
+            )
         except Exception as exc:
             st.error(f"Failed to send: {exc}")
 
