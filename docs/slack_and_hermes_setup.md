@@ -109,6 +109,18 @@ Once the gateway's running, in a Hermes chat session (see [`weekly_cron_job.md`]
 - Ask it something read-only first (e.g. "fit a model for campaign X") before ever asking it to touch the LED, to confirm the pipeline side works before testing the actuator side.
 - Confirm the propose-then-confirm rule actually holds: ask it to change the LED, and check it asks for your explicit yes before calling `apply_led_change` — if it doesn't, stop and let me know before proceeding further, since that's the one safety property this whole design depends on.
 
+## 10. Posting dashboard messages as yourself (optional)
+
+The Streamlit dashboard's "Chat with the AI agent (Slack)" panel can relay a typed message into the channel, but by default it has to use the same bot token Hermes itself uses (`SLACK_BOT_TOKEN`) — a bot token can only ever post as the app, at best with a custom display name (`chat:write.customize`), never as your own actual Slack account. To make dashboard-sent messages genuinely show up as you:
+
+1. In your Slack app's settings: **OAuth & Permissions** → **Scopes** → **User Token Scopes** (a separate list from **Bot Token Scopes**, further down the same page) → **Add an OAuth Scope** → add `chat:write`.
+2. **Install App** → **Reinstall to Workspace** → this time you're authorizing the app to act as *your own* account for that one scope, not just installing the bot.
+3. After reinstalling, the same Install App page now shows a **User OAuth Token** (`xoxp-...`) alongside the existing **Bot User OAuth Token** (`xoxb-...`) — copy the `xoxp-` one specifically, not the bot one.
+4. Set it as `SLACK_USER_TOKEN`, either as an OS environment variable on the machine running Streamlit, or by adding it directly to Hermes's own `.env` file (`hermes config set` doesn't have a generic "set arbitrary key" form for a key it doesn't know about, so edit `~/.hermes/.env` / `%LOCALAPPDATA%\hermes\.env` directly and add a `SLACK_USER_TOKEN=xoxp-...` line) — the dashboard reads this the same way it reads `SLACK_BOT_TOKEN`/`SLACK_HOME_CHANNEL`.
+5. Restart Streamlit. Sent messages should now show your own Slack name/avatar, identical to typing directly in Slack.
+
+This token is scoped to `chat:write` only (posting messages as you) — it can't read messages, change settings, or do anything else as your account. Without it, the dashboard falls back to posting as "Operator (via dashboard)" through the bot token instead (itself needing `chat:write.customize` to even show that custom name — otherwise every fallback-path message shows as the app's default name).
+
 ## Troubleshooting
 
 Real problems hit during this project's first live bring-up, in the order you're likely to hit them:

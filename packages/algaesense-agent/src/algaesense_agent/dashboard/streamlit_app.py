@@ -316,22 +316,37 @@ def _slack_env(key: str) -> str | None:
     return os.environ.get(key) or _hermes_env_values().get(key) or _hermes_config_values().get(key)
 
 
-# A message sent from this dashboard still has to go through the same bot
-# token Hermes itself uses to post its own replies -- there's no way for a
-# bot-token API call to post as the operator's own human Slack account (that
-# would need a separate, more sensitive user-level OAuth flow, not worth
-# adding just for this convenience panel). This marker distinguishes "the
-# operator relayed a message through the dashboard" from "Hermes itself
-# replied," both on the Slack side (via the username/icon_emoji override --
-# needs the app's chat:write.customize scope; without it, Slack silently
-# posts as the app's own default identity instead) and when reading history
-# back into this panel (an operator-relayed message otherwise looks
-# identical to a real Hermes reply, since both carry a bot_id).
+# A bot token (SLACK_BOT_TOKEN, xoxb-...) can never post as the operator's
+# own human Slack account -- only a genuine user token (xoxp-...) can, since
+# that's what Slack's own identity model requires: a bot-token post is
+# always attributed to the app, at best with a custom display name via
+# chat:write.customize (still shown with an "APP" badge in Slack, not as a
+# real account). SLACK_USER_TOKEN is optional and separate from Hermes's own
+# SLACK_BOT_TOKEN -- see docs/slack_and_hermes_setup.md's "Posting dashboard
+# messages as yourself" section for how to obtain one (add `chat:write` as a
+# USER Token Scope, not a bot scope, then reinstall the app and copy the
+# resulting "User OAuth Token" rather than the bot one). When set, sending
+# from this panel posts as the real operator, indistinguishable from typing
+# directly in Slack. When it's not set, this falls back to the bot token
+# with a username/icon_emoji override so at least a dashboard-relayed
+# message doesn't get mistaken for a real Hermes reply -- that override
+# itself needs the app's chat:write.customize scope to actually take
+# effect; without either scope, a fallback-path message shows as "Hermes".
 _DASHBOARD_RELAY_USERNAME = "Operator (via dashboard)"
 
 
 def _slack_client():
     token = _slack_env("SLACK_BOT_TOKEN")
+    if not token:
+        return None
+
+    from slack_sdk import WebClient
+
+    return WebClient(token=token)
+
+
+def _slack_user_client():
+    token = _slack_env("SLACK_USER_TOKEN")
     if not token:
         return None
 
@@ -363,6 +378,13 @@ def _slack_panel() -> None:
             "app and get both values."
         )
         return
+
+    if _slack_env("SLACK_USER_TOKEN") is None:
+        st.caption(
+            "Sent messages currently post as \"Operator (via dashboard)\", not your own Slack "
+            "identity -- set SLACK_USER_TOKEN to post as yourself. See "
+            "docs/slack_and_hermes_setup.md's 'Posting dashboard messages as yourself' section."
+        )
 
     # conversations_history is a real Slack Web API call, not a stand-in --
     # this reads the actual channel Hermes is also listening on, so
@@ -397,13 +419,20 @@ def _slack_panel() -> None:
         message_text = st.text_input("Message to the agent", label_visibility="collapsed")
         submitted = st.form_submit_button("Send")
     if submitted and message_text:
+        user_client = _slack_user_client()
         try:
-            client.chat_postMessage(
-                channel=channel_id,
-                text=message_text,
-                username=_DASHBOARD_RELAY_USERNAME,
-                icon_emoji=":bust_in_silhouette:",
-            )
+            if user_client is not None:
+                # Posts as the real operator's own Slack account -- no
+                # username/icon_emoji override needed or possible here,
+                # since a user token's identity IS the account it belongs to.
+                user_client.chat_postMessage(channel=channel_id, text=message_text)
+            else:
+                client.chat_postMessage(
+                    channel=channel_id,
+                    text=message_text,
+                    username=_DASHBOARD_RELAY_USERNAME,
+                    icon_emoji=":bust_in_silhouette:",
+                )
         except Exception as exc:
             st.error(f"Failed to send: {exc}")
 
