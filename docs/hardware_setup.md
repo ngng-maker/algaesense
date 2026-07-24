@@ -169,3 +169,23 @@ sudo .venv/bin/algaesense-edge start \
 ```
 
 No `--trh-i2c-address` flag is passed here — the service runs fine without a temperature/humidity sensor (those columns just come back null), until you add a BME280 later.
+
+## 10. Running it as a systemd service, so Slack can restart it
+
+Running the command above directly in your SSH session works, but it dies the moment you close that session, and there's no way for `apply_start_new_experiment_run` (the Slack tool that "starts a new experiment") to restart it — that tool works by running `sudo systemctl restart algaesense-edge`, which needs a real systemd service by that name to already exist.
+
+A template unit file is committed at `packages/algaesense-edge/deploy/algaesense-edge.service`. To install it:
+
+1. If you already `git pull`ed the latest code on the Pi, the template is already present at that path. **Don't edit it in place and commit the result** — copy it somewhere local first (or just edit the copy in step 2 below), since `WorkingDirectory`/`ExecStart`'s repo-path placeholder is specific to your machine (fill it in with `pwd`'s actual output from your SSH session) and shouldn't get pushed back to the shared template.
+2. Copy and install it, filling in the placeholders in the copy:
+   ```
+   sudo cp packages/algaesense-edge/deploy/algaesense-edge.service /etc/systemd/system/algaesense-edge.service
+   sudo nano /etc/systemd/system/algaesense-edge.service   # fill in WorkingDirectory/ExecStart's path, --max-par, --par-per-full-duty
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now algaesense-edge
+   ```
+3. Confirm it's actually running: `sudo systemctl status algaesense-edge` (should show `active (running)`), and `curl localhost:8000/health` should return healthy.
+
+Every restart of this unit generates a fresh `experiment_id` from the current date/time (the `$(date ...)` inside `ExecStart`) — that's what lets a Slack-triggered restart count as "starting a new experiment," with no other state to reset.
+
+For the one-time `NOPASSWD` sudoers rule that lets a scripted SSH connection (from your brain machine, via `apply_start_new_experiment_run`) actually run `sudo systemctl restart algaesense-edge` without a password prompt, see `docs/remote_experiment_control.md`.

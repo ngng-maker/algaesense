@@ -1,0 +1,45 @@
+# systemd unit for algaesense-edge, running as a long-lived service on the Pi.
+#
+# Every restart of this unit generates a FRESH experiment_id from the current
+# date/time (the `$(date ...)` in ExecStart), which is what lets
+# `apply_start_new_experiment_run` (mcp_actuators, called from Slack) "start a
+# new experiment run" simply by running `sudo systemctl restart
+# algaesense-edge` -- see docs/remote_experiment_control.md. Runs as root
+# (User=root) because rpi_ws281x needs direct GPIO/PWM/DMA access for the LED
+# strip -- see docs/hardware_setup.md section 4.
+#
+# --led-num-pixels=40 is already filled in for this reactor's actual strip.
+# WorkingDirectory/ExecStart's repo path is a PLACEHOLDER -- fill in with
+# `pwd`'s actual output from your own SSH session on the Pi (not committed
+# back to this template, since it's specific to your machine). --max-par=500
+# and --par-per-full-duty=1.0 are also still PLACEHOLDERS --
+# --par-per-full-duty is fine as a placeholder for starting acquisition (a
+# restart never turns the LED on by itself), just don't trust any PAR number
+# until it's replaced with a real measured value (see docs/hardware_setup.md
+# section 7 for how to derive it); confirm --max-par against this reactor's
+# real safety ceiling before ever actually setting a PAR value above a low
+# test level.
+
+[Unit]
+Description=AlgaeSense edge acquisition service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=<PLACEHOLDER: absolute path to this repo on the Pi, e.g. /home/youruser/algaesense/algaesense>
+ExecStart=/bin/bash -c '<PLACEHOLDER: same absolute path as above>/.venv/bin/algaesense-edge start --experiment exp_$(date +%%Y-%%m-%%dT%%H-%%M-%%S) --reactor R01 --sensor PID01 --camera CAM01 --max-par 500 --par-per-full-duty 1.0 --led-gpio-pin 18 --led-num-pixels 40 --led-pixel-order BRG --voc-i2c-address 0x48'
+Restart=on-failure
+RestartSec=5
+
+# UMask=0000 (not the systemd default 0022, and not 0002) so every file/
+# directory this root-owned process creates is later deletable by a
+# non-root account over SSH (e.g. algaesense-dashboard-sync --pull-from-pi)
+# -- confirmed the hard way (see CLAUDE.md's 2026-07-22 dev-log entry) that
+# 0002 only grants GROUP write, which doesn't help unless that account is a
+# member of the file's group; 0000 unmasks OTHER write too, which does.
+UMask=0000
+
+[Install]
+WantedBy=multi-user.target
