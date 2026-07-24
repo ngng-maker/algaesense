@@ -110,10 +110,21 @@ FIT_DECIMATION = 6
 """Only every FIT_DECIMATION-th generated row is written to Parquet and
 fed into discover_led_response_dynamics's fit -- see the comment at its
 call site for why full-week-at-10s resolution isn't needed there."""
-PREDICT_DT_S = 300.0
+PREDICT_DT_S = 15.0
 """Step size for integrating the DISCOVERED equation forward for the
-predicted-trajectory overlay plot -- see _simulate_predicted_trajectory's
-docstring for why this is decoupled from DT_S."""
+predicted-trajectory overlay plot. MUST stay well below 2*DYNAMIC_RELAXATION_TAU_S
+(120s) for forward-Euler to remain numerically stable at all -- an
+earlier version of this constant was 300s (dt/tau=2.5 > 2), which meant
+even a PERFECTLY CORRECT discovered equation (a plain -1/tau decay)
+would diverge from pure Euler instability, not from any real problem
+with the discovered equation itself. 15s (dt/tau=0.125) is safely
+stable -- see _simulate_predicted_trajectory's own docstring."""
+PREDICT_DURATION_S = 3600.0
+"""How much of the trajectory to integrate/plot for the overlay --
+deliberately NOT the full DURATION_S week: the relaxation settles
+within a few minutes (tau=120s), so the rest of the week is flat
+steady-state with nothing left to compare. 1 hour comfortably shows the
+full transient with margin, at a fraction of the compute cost."""
 
 
 def true_derivative(voc: np.ndarray, par: np.ndarray) -> np.ndarray:
@@ -346,7 +357,7 @@ def _run_one_static_par_experiment(
         model = result.models["ppm_asgas"]
         rmse, r2 = _score_model_at_fixed_par(model, state_names, par_level)
         t_predicted, predicted_voc_values[label] = _simulate_predicted_trajectory(
-            model, state_names, par_level, DURATION_S, voc0=0.0,
+            model, state_names, par_level, PREDICT_DURATION_S, voc0=0.0,
         )
         results[label] = DynamicsRecoveryResult(
             label=label,
@@ -360,8 +371,16 @@ def _run_one_static_par_experiment(
         if verbose:
             print(f"  [PAR={par_level:.0f}, {label}] RMSE vs true derivative (ppm/s): {rmse:.4f}, R^2: {r2:.4f}")
 
+    """
+    Truncate the TRUE trajectory to the same PREDICT_DURATION_S window
+    the predicted trajectory covers -- the full week is mostly flat
+    steady-state with nothing left to compare (the relaxation settles
+    within a few minutes), so plotting all of it just wastes the
+    legible part of the chart on a flat line.
+    """
+    n_plot = int(PREDICT_DURATION_S / DT_S)
     trajectories = ParLevelTrajectories(
-        par_level=par_level, t=t, true_voc_values=true_voc_values,
+        par_level=par_level, t=t[:n_plot], true_voc_values=true_voc_values[:n_plot],
         t_predicted=t_predicted, predicted_voc_values=predicted_voc_values,
     )
     return results, trajectories

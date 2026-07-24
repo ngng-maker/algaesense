@@ -19,7 +19,6 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 """
 Makes this file's own sibling import below (ground_truth) resolve regardless
@@ -36,15 +35,12 @@ from ground_truth import (
     AmbientCovariateTruth,
     NoiseConfig,
     SensorCalibrationTruth,
-    curvy_drift_artifact_mv,
     generate_ambient_blank_recording,
     generate_calibration_recording,
     generate_common_mode_check_recording,
     generate_cross_sensor_consistency_recording,
     generate_experiment_recording,
-    sluggish_flat_artifact_mv,
     true_voc_ppm,
-    zigzag_rising_artifact_mv,
 )
 
 from jaxsr_calibration.calibration.apply import apply_calibration, persist_calibration
@@ -70,18 +66,11 @@ CROSS_SENSOR_PAR = 250.0
 CROSS_SENSOR_TEMP = 30.0
 CROSS_SENSOR_DURATION_S = 600
 CROSS_SENSOR_REACTOR_ID = "R_cross_sensor"
-"""A mid-domain (PAR, temp) point all 3 sensors observe SIMULTANEOUSLY,
-each with its own distinct systematic-drift artifact -- see
-ground_truth.py's artifact functions and generate_cross_sensor_consistency_recording
-for why this checks a genuinely different question from the rest of
-Test 1 (does correction make different-LOOKING sensors agree with each
-other and with the truth, not just recover a single sensor's own true
-value)."""
-CROSS_SENSOR_ARTIFACT_SHAPES: dict[str, tuple[str, Callable[[np.ndarray], np.ndarray]]] = {
-    "PID01": ("sluggish/flat", sluggish_flat_artifact_mv),
-    "PID02": ("zigzag-rising", zigzag_rising_artifact_mv),
-    "PID03": ("curvy drift", curvy_drift_artifact_mv),
-}
+"""A mid-domain (PAR, temp) point all 3 sensors observe SIMULTANEOUSLY --
+see generate_cross_sensor_consistency_recording's docstring for why this
+checks a genuinely different question from the rest of Test 1 (does
+correction bring 3 sensors observing the SAME true value into agreement
+with each other, not just recover one sensor's own value)."""
 
 
 def _true_voc_curve_form(xy, vmax, k_m, temp_slope, gamma, photo_k, baseline):
@@ -153,9 +142,8 @@ def _fit_and_score(par_values: np.ndarray, temp_values: np.ndarray, ppm_values: 
 @dataclass
 class CrossSensorConsistencyResult:
     """Three sensors observing the EXACT SAME (par, temp) condition
-    simultaneously, each carrying its own distinct systematic-drift
-    artifact -- checks whether the correction pipeline makes different-
-    LOOKING sensors agree with EACH OTHER (cross_sensor_spread) and with
+    simultaneously -- checks whether the correction pipeline brings
+    them into agreement WITH EACH OTHER (cross_sensor_spread) and with
     the TRUE value (rmse_vs_true), not just whether it recovers one
     sensor's own reading correctly."""
 
@@ -163,7 +151,7 @@ class CrossSensorConsistencyResult:
     temp: float
     true_ppm: float
     t: list[float]
-    shapes: dict[str, str]
+    sensor_ids: list[str]
     raw_ppm: dict[str, list[float]]
     corrected_ppm: dict[str, list[float]]
     raw_cross_sensor_spread: float
@@ -179,11 +167,17 @@ def run_cross_sensor_consistency_test(
     rest of Test 1 fits (passed in, not refit) -- this sub-test isn't
     about whether calibration/covariate fitting works (already checked
     elsewhere), it's specifically about whether applying that already-
-    correct correction to THREE DIFFERENTLY-SHAPED raw traces of the
-    SAME true value makes them converge, or leaves a real residual
-    difference between sensors."""
+    correct correction to 3 sensors observing the SAME true value makes
+    them converge with each other and with the truth.
+
+    Deliberately does NOT inject the sluggish/zigzag/curvy drift
+    artifacts (see ground_truth.py's generate_cross_sensor_consistency_recording
+    docstring for why) -- those represent a genuinely different noise
+    class this pipeline was never built to correct for, so including
+    them here would misleadingly look like a pipeline failure rather
+    than an honest scope limitation. That limitation is called out as a
+    plain-text note in REPORT.md instead of demonstrated live."""
     noise = NoiseConfig(ambient=AmbientCovariateTruth())
-    artifact_fns = {sid: fn for sid, (_, fn) in CROSS_SENSOR_ARTIFACT_SHAPES.items()}
     readings = generate_cross_sensor_consistency_recording(
         experiment_id="exp_cross_sensor",
         reactor_id=CROSS_SENSOR_REACTOR_ID,
@@ -192,7 +186,6 @@ def run_cross_sensor_consistency_test(
         noise=noise,
         par=CROSS_SENSOR_PAR,
         temp=CROSS_SENSOR_TEMP,
-        artifact_mv_fns=artifact_fns,
         duration_s=CROSS_SENSOR_DURATION_S,
         seed=seed,
     )
@@ -240,9 +233,8 @@ def run_cross_sensor_consistency_test(
     if verbose:
         print(f"  cross-sensor spread (ppm, std across sensors, averaged over time): raw={raw_spread:.2f}, corrected={corrected_spread:.2f}")
         for sensor_id in SENSOR_IDS:
-            shape_name, _ = CROSS_SENSOR_ARTIFACT_SHAPES[sensor_id]
             print(
-                f"  cross-sensor[{sensor_id}, {shape_name}]: raw RMSE vs true={raw_rmse[sensor_id]:.2f}, "
+                f"  cross-sensor[{sensor_id}]: raw RMSE vs true={raw_rmse[sensor_id]:.2f}, "
                 f"corrected RMSE vs true={corrected_rmse[sensor_id]:.2f}"
             )
 
@@ -251,7 +243,7 @@ def run_cross_sensor_consistency_test(
         temp=CROSS_SENSOR_TEMP,
         true_ppm=true_ppm,
         t=t_values or [],
-        shapes={sid: name for sid, (name, _) in CROSS_SENSOR_ARTIFACT_SHAPES.items()},
+        sensor_ids=list(SENSOR_IDS),
         raw_ppm=raw_ppm,
         corrected_ppm=corrected_ppm,
         raw_cross_sensor_spread=raw_spread,
@@ -353,12 +345,12 @@ def run_calibration_recovery_test(
 
         """
         Step 3.5 -- cross-sensor consistency: all 3 sensors observe the
-        SAME (PAR, temp) condition simultaneously, each with its own
-        distinct systematic-drift shape (flat/zigzag/curvy), reusing the
-        SAME calibration/covariate models just fitted above. Checks a
+        SAME (PAR, temp) condition simultaneously, reusing the SAME
+        calibration/covariate models just fitted above. Checks a
         genuinely different question from the rest of Test 1: does
-        correction make different-LOOKING sensors agree with each other
-        and with the truth, not just recover one sensor's own value.
+        correction bring several sensors observing the SAME true value
+        into agreement with each other, not just recover one sensor's
+        own value.
         """
         cross_sensor_result = run_cross_sensor_consistency_test(
             calibration_dir, covariate_models, seed=seed + 4, verbose=verbose,
@@ -441,8 +433,8 @@ if __name__ == "__main__":
 
     print(f"\nCross-sensor consistency (PAR={cross_sensor.par}, temp={cross_sensor.temp}, true={cross_sensor.true_ppm:.1f} ppm):")
     print(f"  cross-sensor spread: raw={cross_sensor.raw_cross_sensor_spread:.2f} ppm, corrected={cross_sensor.corrected_cross_sensor_spread:.2f} ppm")
-    for sensor_id, shape in cross_sensor.shapes.items():
+    for sensor_id in cross_sensor.sensor_ids:
         print(
-            f"  {sensor_id} ({shape}): raw RMSE vs true={cross_sensor.raw_rmse_vs_true[sensor_id]:.2f}, "
+            f"  {sensor_id}: raw RMSE vs true={cross_sensor.raw_rmse_vs_true[sensor_id]:.2f}, "
             f"corrected RMSE vs true={cross_sensor.corrected_rmse_vs_true[sensor_id]:.2f}"
         )

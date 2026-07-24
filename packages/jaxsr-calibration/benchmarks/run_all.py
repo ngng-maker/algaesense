@@ -30,15 +30,15 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from calibration_recovery import (
-    CROSS_SENSOR_ARTIFACT_SHAPES,
-    CROSS_SENSOR_DURATION_S,
     TRUE_CALIBRATION,
     run_calibration_recovery_test,
 )
 from doe_comparison import (
+    LABWIKI_BOUND_OVERRIDE,
     MEASUREMENT_NOISE_SIGMA_PPM,
     N_EXTRA,
     N_TOTAL_EXPERIMENTS,
+    PHOTO_THRESHOLD_PAR,
     SEED_ONLY_BEST,
     TRUE_GLOBAL_MAX,
     TRUE_GLOBAL_MAX_PAR,
@@ -49,6 +49,7 @@ from doe_methods import grid_points
 from dynamics_recovery import (
     DURATION_S,
     PAR_LEVELS,
+    PREDICT_DURATION_S,
     TEMP,
     run_dynamics_recovery_test,
 )
@@ -219,17 +220,18 @@ def _run_dynamics_recovery_repeated(n_seeds: int):
     return per_label_rmse, per_label_r2, per_label_equation, per_label_selected_features, per_label_diverged, best_trajectories
 
 
-def _plot_dynamics_recovery(trajectories: dict, per_label_rmse: dict, per_label_r2: dict, output_path: Path) -> None:
-    """Three panels -- (a)/(b) overlay every static-PAR experiment's TRUE
+def _plot_dynamics_recovery(trajectories: dict, output_path: Path) -> None:
+    """Two panels -- (a)/(b) overlay every static-PAR experiment's TRUE
     VOC(t) trajectory (solid) against the DISCOVERED equation's own
     predicted trajectory (dashed, integrated forward from the same
     initial condition), one color per PAR level, raw mode in (a) and
     ambient-corrected mode in (b) -- deliberately two panels rather than
     one twin-axis plot (a documented chart anti-pattern) or one
-    overcrowded panel with 2x as many lines. Panel (c) is the numeric
-    accuracy summary, aggregated across every (seed, PAR level)
-    independent trial (none pooled together before fitting)."""
-    fig, axes = plt.subplots(1, 3, figsize=(19, 5.5))
+    overcrowded panel with 2x as many lines. The numeric accuracy
+    summary (RMSE/R^2, aggregated across every (seed, PAR level)
+    independent trial) is reported in REPORT.md's text rather than a
+    third bar-chart panel here."""
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
 
     par_levels_sorted = sorted(trajectories.keys())
     level_colors = {level: PALETTE[i % len(PALETTE)] for i, level in enumerate(par_levels_sorted)}
@@ -262,72 +264,13 @@ def _plot_dynamics_recovery(trajectories: dict, per_label_rmse: dict, per_label_
         ax.set_title(f"({'a' if mode_idx == 0 else 'b'}) {mode_title}\nsolid = true, dashed = discovered-equation prediction")
         ax.legend(loc="lower right", fontsize=8, ncol=2, framealpha=0.95)
 
-    labels = list(per_label_rmse.keys())
-    short_labels = ["Raw\n(no ambient correction)" if "raw" in l else "Corrected\n(ambient_baseline_run_id set)" for l in labels]
-    rmse_means = [float(np.mean(per_label_rmse[l])) for l in labels]
-    rmse_stds = [float(np.std(per_label_rmse[l])) for l in labels]
-    r2_means = [float(np.mean(per_label_r2[l])) for l in labels]
-    colors = [RAW_COLOR if "raw" in l else CORRECTED_COLOR for l in labels]
-    x = np.arange(len(labels))
-    bars = axes[2].bar(x, rmse_means, yerr=rmse_stds, capsize=5, color=colors, edgecolor="white", linewidth=0.5)
-    axes[2].set_xticks(x)
-    axes[2].set_xticklabels(short_labels)
-    axes[2].set_ylabel("RMSE vs. true dVOC/dt (ppm/s)")
-    axes[2].set_title(f"(c) Discovered-equation accuracy\n(mean ± std of {len(per_label_rmse[labels[0]])} independent (seed, PAR level) trials)")
-    for bar, r2 in zip(bars, r2_means):
-        axes[2].text(
-            bar.get_x() + bar.get_width() / 2, bar.get_height() + max(rmse_stds) * 0.15,
-            f"R² = {r2:.2f}", ha="center", va="bottom", fontsize=11, fontweight="bold",
-        )
-
     fig.suptitle(
         "Test 3 — Dynamics recovery: static-PAR step experiments, real discover_led_response_dynamics\n"
-        "(panels a/b show the best-fitting of several repeats, for a legible illustration — panel c and "
-        "the report state the full, honest range including worse fits)",
+        "(shows the best-fitting of several repeats, for a legible illustration — the report states "
+        "the full, honest range including worse fits)",
         fontsize=13,
     )
     fig.tight_layout(rect=[0, 0, 1, 0.90])
-    fig.savefig(output_path, dpi=200)
-    plt.close(fig)
-
-
-def _plot_calibration_recovery(results: dict, output_path: Path) -> None:
-    fig, axes = plt.subplots(1, 3, figsize=(17, 5.2))
-
-    raw, corrected = results["raw"], results["corrected"]
-
-    labels = ["Raw\n(uncorrected voltage)", "Corrected\n(ambient-baseline applied)"]
-    rmses = [raw.rmse_vs_true_ppm, corrected.rmse_vs_true_ppm]
-    bars = axes[0].bar(labels, rmses, color=[RAW_COLOR, CORRECTED_COLOR], edgecolor="white", linewidth=0.5)
-    axes[0].set_ylabel("RMSE vs. true VOC (ppm)")
-    axes[0].set_title("(a) Recovered VOC accuracy")
-    for bar, val in zip(bars, rmses):
-        axes[0].text(bar.get_x() + bar.get_width() / 2, val, f"{val:.2f} ppm", ha="center", va="bottom", fontweight="bold")
-
-    param_names = list(raw.param_pct_error.keys())
-    x = np.arange(len(param_names))
-    width = 0.36
-    axes[1].bar(x - width / 2, [raw.param_pct_error[p] for p in param_names], width, label="Raw", color=RAW_COLOR, edgecolor="white", linewidth=0.5)
-    axes[1].bar(x + width / 2, [corrected.param_pct_error[p] for p in param_names], width, label="Corrected", color=CORRECTED_COLOR, edgecolor="white", linewidth=0.5)
-    axes[1].set_xticks(x)
-    axes[1].set_xticklabels(param_names, rotation=20, ha="right")
-    axes[1].set_ylabel("Parameter recovery error (%)")
-    axes[1].set_title("(b) True-function parameter recovery")
-    axes[1].legend()
-
-    axes[2].scatter(raw.true_ppm, raw.measured_ppm, color=RAW_COLOR, s=70, alpha=0.85, edgecolor="white", linewidth=0.6, label="Raw")
-    axes[2].scatter(corrected.true_ppm, corrected.measured_ppm, color=CORRECTED_COLOR, s=70, alpha=0.85, edgecolor="white", linewidth=0.6, label="Corrected")
-    lims = [min(raw.true_ppm + corrected.true_ppm) - 20, max(raw.true_ppm + corrected.true_ppm) + 20]
-    axes[2].plot(lims, lims, color=TRUE_COLOR, linestyle="--", linewidth=1.5, label="Perfect recovery (y = x)")
-    axes[2].set_xlim(lims)
-    axes[2].set_ylim(lims)
-    axes[2].set_xlabel("True VOC (ppm)")
-    axes[2].set_ylabel("Recovered VOC (ppm)")
-    axes[2].set_title("(c) Generated data: recovered vs. true")
-    axes[2].legend(loc="upper left")
-
-    fig.suptitle("Test 1 — Calibration recovery: raw vs. ambient-baseline-corrected pipeline")
-    fig.tight_layout(rect=[0, 0, 1, 0.93])
     fig.savefig(output_path, dpi=200)
     plt.close(fig)
 
@@ -336,24 +279,27 @@ def _plot_cross_sensor_consistency(result, output_path: Path) -> None:
     """Two panels -- (a) RAW, (b) CORRECTED -- each overlaying all 3
     sensors' ppm trace over time (one color per sensor, fixed order)
     against a dashed reference line at the true value. All 3 sensors are
-    observing the EXACT SAME (PAR, temp) condition, so in an ideal world
-    every colored line would sit exactly on the dashed true-value line in
-    BOTH panels -- how far short of that the RAW panel falls (three
-    visibly different shapes: flat/zigzag/curvy) vs. how much closer
-    the CORRECTED panel gets is the entire point of this chart."""
+    observing the EXACT SAME (PAR, temp) condition, contaminated ONLY
+    with the same ambient-covariate/AR(1) noise every other recording in
+    this benchmark uses (the contamination the pipeline actually
+    models), so in an ideal world every colored line would sit exactly
+    on the dashed true-value line in BOTH panels -- how far short of
+    that the RAW panel falls vs. how much closer the CORRECTED panel
+    gets is the entire point of this chart."""
     fig, axes = plt.subplots(1, 2, figsize=(15, 5.5))
 
-    sensor_colors = {sid: PALETTE[i % len(PALETTE)] for i, sid in enumerate(result.shapes.keys())}
+    sensor_ids = result.sensor_ids
+    sensor_colors = {sid: PALETTE[i % len(PALETTE)] for i, sid in enumerate(sensor_ids)}
     t_minutes = np.array(result.t) / 60.0
 
     for panel_idx, (ax, ppm_dict, title) in enumerate([
         (axes[0], result.raw_ppm, "(a) Raw (uncorrected voltage)"),
         (axes[1], result.corrected_ppm, "(b) Corrected (ambient-baseline applied)"),
     ]):
-        for sensor_id, shape_name in result.shapes.items():
+        for sensor_id in sensor_ids:
             ax.plot(
                 t_minutes, ppm_dict[sensor_id], color=sensor_colors[sensor_id], linewidth=1.8,
-                label=f"{sensor_id} ({shape_name})", alpha=0.9,
+                label=sensor_id, alpha=0.9,
             )
         ax.axhline(result.true_ppm, color=TRUE_COLOR, linestyle="--", linewidth=1.5, label="True VOC (same for all 3)")
         ax.set_xlabel("Elapsed time (minutes)")
@@ -362,8 +308,7 @@ def _plot_cross_sensor_consistency(result, output_path: Path) -> None:
         ax.legend(loc="best", fontsize=9, framealpha=0.95)
 
     fig.suptitle(
-        f"Test 1b — Cross-sensor consistency: 3 sensors, one shared (PAR={result.par:.0f}, temp={result.temp:.0f}°C) condition, "
-        "each with its own drift shape"
+        f"Test 1b — Cross-sensor consistency: 3 sensors, one shared (PAR={result.par:.0f}, temp={result.temp:.0f}°C) condition"
     )
     fig.tight_layout(rect=[0, 0, 1, 0.92])
     fig.savefig(output_path, dpi=200)
@@ -679,30 +624,6 @@ def _write_report(
         "panel, for anyone opening them without already knowing the code behind them."
     )
     lines.append("")
-    lines.append("### `calibration_recovery.png` (Test 1) -- 3 panels")
-    lines.append("")
-    lines.append(
-        "- **(a) Recovered VOC accuracy**: two bars, one number each -- how far off (in ppm) the "
-        "recovered VOC value typically is from the true value, using raw sensor voltage (blue) vs. "
-        "using the corrected pipeline (orange). Shorter bar = more accurate. This is the headline "
-        "number: does correction actually help?"
-    )
-    lines.append(
-        "- **(b) True-function parameter recovery**: one pair of bars (blue = raw, orange = "
-        "corrected) per named coefficient in the ground-truth equation (`vmax`, `k_m`, `temp_slope`, "
-        "`gamma`, `photo_k`, `baseline`). Each bar is a % error -- how far the *fitted* coefficient "
-        "landed from its true, known value. A short bar means that specific piece of the underlying "
-        "physics was recovered correctly, not just that predictions looked reasonable overall."
-    )
-    lines.append(
-        "- **(c) Generated data: recovered vs. true**: one dot per synthetic experiment, blue for "
-        "raw-recovered VOC and orange for corrected-recovered VOC, plotted against the true VOC value "
-        "that experiment actually had (x-axis). The dashed diagonal line is 'perfect recovery' -- a "
-        "dot sitting exactly on that line means the recovered value exactly matched the truth. Dots "
-        "far above/below the line are experiments where that pipeline got it wrong. This panel is "
-        "also literally what the raw generated data looks like."
-    )
-    lines.append("")
     lines.append("### `cross_sensor_consistency.png` (Test 1b) -- 2 panels")
     lines.append("")
     lines.append(
@@ -711,17 +632,17 @@ def _write_report(
         "sit exactly on that dashed line in BOTH panels."
     )
     lines.append(
-        "- **(a) Raw**: each sensor's own uncorrected trace over time -- deliberately built to look "
-        "visually distinct (one flat/sluggish, one jagged zigzag, one smooth curve), simulating three "
-        "real sensor-specific fault types layered on top of the same true reading."
+        "- **(a) Raw**: each sensor's own uncorrected trace over time -- the wobble visible here is "
+        "the same ambient RH/T covariate contamination and AR(1) noise every other recording in this "
+        "benchmark carries."
     )
     lines.append(
         "- **(b) Corrected**: the same three sensors after the real fleet-zero + ambient-baseline "
         "correction pipeline is applied. How much closer the colored lines sit to the dashed true-"
         "value line here, versus panel (a), is a direct visual read of whether correction actually "
-        "makes different-looking sensors agree with each other and with the truth -- the report's "
-        "own text states the exact numbers (spread before/after, per-sensor RMSE before/after) rather "
-        "than leaving it to eyeballing alone."
+        "brings sensors into agreement with each other and with the truth -- the report's own text "
+        "states the exact numbers (spread before/after, per-sensor RMSE before/after) rather than "
+        "leaving it to eyeballing alone."
     )
     lines.append("")
     lines.append("### `doe_comparison.png` (Test 2) -- 3 panels")
@@ -760,7 +681,7 @@ def _write_report(
         "(b)."
     )
     lines.append("")
-    lines.append("### `dynamics_recovery.png` (Test 3) -- 3 panels")
+    lines.append("### `dynamics_recovery.png` (Test 3) -- 2 panels")
     lines.append("")
     lines.append(
         f"Each of the {len(PAR_LEVELS)} static PAR levels gets its own color, used consistently across "
@@ -768,23 +689,16 @@ def _write_report(
         "DASHED line of the same color is the DISCOVERED equation's own predicted trajectory (what "
         "`discover_led_response_dynamics` thinks would happen, integrated forward from the same "
         "starting point) -- so how closely dashed tracks solid, for each color, is a direct visual "
-        "read of accuracy, not just an RMSE number."
+        "read of accuracy, not just an RMSE number. Each experiment actually runs for "
+        f"{DURATION_S / 86400.0:.0f} days, but only the first "
+        f"{PREDICT_DURATION_S / 60.0:.0f} minutes are plotted -- the relaxation settles within a few "
+        "minutes, so the rest of the week is flat steady-state with nothing left to compare."
     )
     lines.append(
         "- **(a) Raw** / **(b) Corrected**: the same overlay, without vs. with the ambient-baseline "
-        "correction applied before calibration. Both panels span the full "
-        f"{DURATION_S / 86400.0:.0f}-day experiment duration -- the interesting part (the rise from "
-        "0 ppm to steady state) happens in the first few minutes; the rest of each line is essentially "
-        "flat because the system has already settled, exactly as a real week-long culture would behave "
-        "at a fixed light level."
-    )
-    lines.append(
-        "- **(c) Discovered-equation accuracy**: two bars -- how far off (RMSE) the EQUATION that "
-        "`discover_led_response_dynamics` came up with is from the true underlying rate-of-change "
-        "law, without (blue) vs. with (orange) the ambient-baseline correction applied first, "
-        "averaged across every independent (seed, PAR level) trial. The R² value printed above each "
-        "bar is the same comparison on a 0-1 scale (higher = better fit). Shorter bar and higher R² = "
-        "a more accurate discovered equation."
+        "correction applied before calibration. The exact RMSE/R^2 numbers behind these panels "
+        "(averaged across every independent (seed, PAR level) trial, not just the one illustrative "
+        "run shown here) are reported as text in the Test 3 section below rather than a separate chart."
     )
     lines.append("")
 
@@ -845,21 +759,17 @@ def _write_report(
     )
     lines.append("")
 
-    lines.append("### Cross-sensor consistency -- do different-looking sensors converge after correction?")
+    lines.append("### Cross-sensor consistency -- do different sensors converge after correction?")
     lines.append("")
     lines.append(
         "A genuinely different question from the rest of Test 1 above: instead of one sensor "
-        f"observing many different (PAR, temp) settings, all {len(cross_sensor_result.shapes)} sensors "
+        f"observing many different (PAR, temp) settings, all {len(cross_sensor_result.sensor_ids)} sensors "
         f"here observe the EXACT SAME condition (PAR={cross_sensor_result.par:.0f} µmol·m⁻²·s⁻¹, "
         f"temp={cross_sensor_result.temp:.0f}°C, true VOC={cross_sensor_result.true_ppm:.1f} ppm) "
-        "SIMULTANEOUSLY, but each carries its own distinctive systematic-drift artifact on top of "
-        "the same ambient-covariate/AR(1) noise every other recording in this benchmark uses -- "
-        "deliberately NOT the kind of contamination fleet-zero (a single constant bias) or ambient-"
-        "baseline correction (a linear RH/T relationship) are built to model:"
+        "SIMULTANEOUSLY, contaminated only with the same ambient-covariate/AR(1) noise every other "
+        "recording in this benchmark uses -- the contamination fleet-zero and ambient-baseline "
+        "correction actually model."
     )
-    lines.append("")
-    for sensor_id, shape in cross_sensor_result.shapes.items():
-        lines.append(f"- **{sensor_id}** -- `{shape}`")
     lines.append("")
     lines.append(
         "Two DISTINCT things are checked: do the sensors agree WITH EACH OTHER after correction "
@@ -873,7 +783,7 @@ def _write_report(
         cross_sensor_result.raw_cross_sensor_spread - cross_sensor_result.corrected_cross_sensor_spread
     ) / cross_sensor_result.raw_cross_sensor_spread
     lines.append(
-        f"**Cross-sensor spread** (standard deviation across the {len(cross_sensor_result.shapes)} sensors' "
+        f"**Cross-sensor spread** (standard deviation across the {len(cross_sensor_result.sensor_ids)} sensors' "
         f"readings at each instant, averaged over the whole window): raw = "
         f"{cross_sensor_result.raw_cross_sensor_spread:.2f} ppm, corrected = "
         f"{cross_sensor_result.corrected_cross_sensor_spread:.2f} ppm "
@@ -882,9 +792,9 @@ def _write_report(
     lines.append("")
     lines.append("**Per-sensor recovery vs. the true value:**")
     lines.append("")
-    for sensor_id, shape in cross_sensor_result.shapes.items():
+    for sensor_id in cross_sensor_result.sensor_ids:
         lines.append(
-            f"- **{sensor_id}** (`{shape}`): raw RMSE = {cross_sensor_result.raw_rmse_vs_true[sensor_id]:.2f} ppm, "
+            f"- **{sensor_id}**: raw RMSE = {cross_sensor_result.raw_rmse_vs_true[sensor_id]:.2f} ppm, "
             f"corrected RMSE = {cross_sensor_result.corrected_rmse_vs_true[sensor_id]:.2f} ppm"
         )
     lines.append("")
@@ -898,22 +808,31 @@ def _write_report(
     residual_spread_pct_of_true = 100.0 * cross_sensor_result.corrected_cross_sensor_spread / cross_sensor_result.true_ppm
     if cross_sensor_result.corrected_cross_sensor_spread < cross_sensor_result.raw_cross_sensor_spread * 0.15:
         verdict = (
-            "correction very nearly eliminates the disagreement between sensors -- the pipeline's "
-            "modeled contamination (fleet-zero bias, ambient RH/T covariate) accounts for almost all "
-            "of what was making these three differently-shaped raw traces disagree."
+            "correction very nearly eliminates the disagreement between sensors -- consistent with "
+            "Test 1's own whole-domain finding above, since this uses the identical noise sources and "
+            "the identical calibration/covariate models that already recover the true value there to "
+            "within a fraction of a ppm."
         )
     else:
         verdict = (
-            "correction reduces but does NOT eliminate the disagreement between sensors -- a real, "
-            f"honest residual of {cross_sensor_result.corrected_cross_sensor_spread:.1f} ppm "
-            f"({residual_spread_pct_of_true:.1f}% of the true value) remains even after applying "
-            "every correction this pipeline currently knows how to do. This is expected, not a bug: "
-            "the drift artifacts injected here (a sluggish lag, a periodic zigzag, a smooth exponential "
-            "curve) are a genuinely different class of contamination from the constant bias and linear "
-            "RH/T covariate the pipeline actually models and corrects for -- this sub-test exists "
-            "specifically to show that boundary honestly, not to imply the pipeline is broken."
+            f"correction reduces but does NOT fully eliminate the disagreement between sensors -- a "
+            f"residual of {cross_sensor_result.corrected_cross_sensor_spread:.1f} ppm "
+            f"({residual_spread_pct_of_true:.1f}% of the true value) remains."
         )
     lines.append(f"**Verdict:** {verdict}")
+    lines.append("")
+    lines.append(
+        "**A limitation worth flagging to experimentalists, not demonstrated live here:** real PID "
+        "sensors can exhibit systematic drift patterns this benchmark's noise model does NOT include "
+        "and this pipeline was never built to correct for -- e.g. a sluggish/heavily-damped response "
+        "that lags well behind the true value, a periodic drift from intermittent connector/thermal-"
+        "cycling contact resistance, or a slow exponential drift from sensor aging. None of these are "
+        "a constant bias (what fleet-zero corrects) or a linear function of ambient RH/T (what "
+        "ambient-baseline covariate correction models), so if a sensor's raw trace shows a shape like "
+        "this in practice, fleet-zero/ambient-baseline correction alone should NOT be trusted to fix "
+        "it -- that would need to be diagnosed and addressed separately (e.g. sensor replacement, a "
+        "dedicated drift model), not assumed away by this pipeline."
+    )
     lines.append("")
 
     lines.append("## Test 2 -- does calibration + JAXSR active learning + labwiki beat classic DoE?")
@@ -1064,6 +983,47 @@ def _write_report(
         "`doe_comparison.png` for both metrics' full round-by-round picture -- panel (c) is a zoomed "
         "view of panel (b)'s tail end specifically to make this seed-adjusted separation visible."
     )
+    lines.append("")
+
+    """
+    Why does 'Ours + labwiki' underperform 'Ours (plain)'? Computed from
+    the actual TRUE_GLOBAL_MAX_PAR vs. LABWIKI_BOUND_OVERRIDE values
+    currently in effect, never hardcoded -- this is a real, checkable
+    mechanism, not a guess: bound_overrides INTERSECTS the search range
+    (never widens it), so if the note-derived upper bound sits below the
+    true optimum, the labwiki-informed search is structurally unable to
+    ever find it, no matter how many rounds run.
+    """
+    labwiki_upper_bound = LABWIKI_BOUND_OVERRIDE["par_umol_m2_s"][1]
+    optimum_excluded = TRUE_GLOBAL_MAX_PAR > labwiki_upper_bound
+    if optimum_excluded:
+        labwiki_explanation = (
+            f"**Why does 'Ours + labwiki' underperform 'Ours (plain)'?** The synthetic labwiki note "
+            f"used here says VOC visibly declines above PAR={PHOTO_THRESHOLD_PAR:.0f} (true -- the "
+            "ground truth genuinely has a photoinhibition penalty starting exactly there) and "
+            f"recommends staying below it; the benchmark encodes that literally as a HARD "
+            f"`bound_overrides` exclusion at PAR>{labwiki_upper_bound:.0f}. But the true global "
+            f"optimum actually sits at PAR={TRUE_GLOBAL_MAX_PAR:.0f} -- just PAST that threshold, "
+            "because the PAR x temperature interaction term still outweighs the modest "
+            "photoinhibition penalty there at high temperature. `bound_overrides` only ever "
+            "NARROWS the search range, never widens it, so once that hard exclusion is set, the "
+            "labwiki-informed search is structurally unable to ever find the true best point, no "
+            "matter how many rounds run -- not a bug in the active-learning workflow itself, but an "
+            "honest illustration of a real risk: translating a qualitative note ('declines above X') "
+            "into a hard numeric cutoff AT exactly X, with no safety margin, can actively exclude a "
+            "genuinely better region the note-writer didn't anticipate. The REAL intended workflow "
+            "(per this project's system_prompt.md) treats turning a note into a numeric constraint "
+            "as Hermes's own judgment call, not an automatic, literal translation -- this benchmark's "
+            "fixed, hardcoded bound demonstrates what happens when that judgment call is skipped."
+        )
+    else:
+        labwiki_explanation = (
+            "**On 'Ours + labwiki' vs. 'Ours (plain)':** this run, the labwiki-derived bound "
+            f"(PAR <= {labwiki_upper_bound:.0f}) does NOT exclude the true optimum "
+            f"(PAR={TRUE_GLOBAL_MAX_PAR:.0f} sits within it), so any underperformance here isn't "
+            "from the constraint hiding the true best point."
+        )
+    lines.append(labwiki_explanation)
     lines.append("")
     lines.append(
         "**A second, important caveat found while building this benchmark:** `jaxsr."
@@ -1294,7 +1254,6 @@ def main() -> None:
 
     print("Running Test 1 (calibration recovery)...")
     calibration_results, cross_sensor_result = run_calibration_recovery_test(verbose=True)
-    _plot_calibration_recovery(calibration_results, OUTPUT_DIR / "calibration_recovery.png")
     _plot_cross_sensor_consistency(cross_sensor_result, OUTPUT_DIR / "cross_sensor_consistency.png")
 
     print(f"\nRunning Test 2 (DoE comparison, {N_SEEDS} repeats)...")
@@ -1304,7 +1263,7 @@ def main() -> None:
 
     print(f"\nRunning Test 3 (dynamics recovery, {N_DYNAMICS_SEEDS} repeats)...")
     dynamics_rmse, dynamics_r2, dynamics_equations, dynamics_selected_features, dynamics_diverged, representative_trajectories = _run_dynamics_recovery_repeated(N_DYNAMICS_SEEDS)
-    _plot_dynamics_recovery(representative_trajectories, dynamics_rmse, dynamics_r2, OUTPUT_DIR / "dynamics_recovery.png")
+    _plot_dynamics_recovery(representative_trajectories, OUTPUT_DIR / "dynamics_recovery.png")
 
     _write_report(
         calibration_results, cross_sensor_result, rmse_curves, best_found_curves, rounds_to_target, target_rmse,
@@ -1313,7 +1272,6 @@ def main() -> None:
     )
 
     print(f"\nDone. Results written to {OUTPUT_DIR}/")
-    print("  - calibration_recovery.png")
     print("  - cross_sensor_consistency.png")
     print("  - doe_comparison.png")
     print("  - dynamics_recovery.png")

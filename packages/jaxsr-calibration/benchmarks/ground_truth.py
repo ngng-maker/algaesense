@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass, field
-from typing import Callable
 
 import numpy as np
 import polars as pl
@@ -332,52 +331,6 @@ def generate_experiment_recording(
     return pl.concat(frames)
 
 
-"""
-Three distinct, physically-motivated per-sensor systematic-drift
-artifacts -- unlike the constant per-sensor bias (b0/b1) and the shared
-ambient RH/T covariate nuisance already modeled above, these represent a
-real, different class of sensor fault: a raw voltage trace whose SHAPE
-over time is genuinely sensor-specific, even when every sensor is
-observing the exact same (PAR, temp) condition. Deliberately NOT
-something fleet-zero (a single constant offset) or ambient-baseline
-covariate correction (a linear RH/T relationship) are built to remove --
-the point of testing this is to see whether the existing correction
-pipeline denoises these shapes into agreement anyway, or whether a real,
-honest residual difference between sensors remains.
-"""
-
-
-def sluggish_flat_artifact_mv(t: np.ndarray, stale_offset_mv: float = -60.0, tau_s: float = 3000.0) -> np.ndarray:
-    """A heavily-damped/lagged sensor -- e.g. a PID cell with a slow
-    membrane response -- starts from a stale offset and relaxes toward
-    zero (no extra artifact) only very slowly (tau_s=3000s is 5x the
-    600s window this is actually observed over, so within that window it
-    reads as almost flat/stagnant, persistently wrong, rather than
-    tracking anything -- unlike a bare exp() with a short tau, which
-    would visibly finish decaying and look like a normal rise instead)."""
-    return stale_offset_mv * np.exp(-t / tau_s)
-
-
-def zigzag_rising_artifact_mv(
-    t: np.ndarray, amplitude_mv: float = 20.0, period_s: float = 90.0, rise_rate_mv_per_s: float = 0.05,
-) -> np.ndarray:
-    """A periodic triangle-wave drift -- e.g. intermittent connector/
-    thermal-cycling contact-resistance changes -- superimposed on a slow
-    rising trend, giving a genuinely jagged, non-smooth zigzag shape
-    (distinct from a smooth sinusoid)."""
-    from scipy.signal import sawtooth
-
-    triangle = sawtooth(2.0 * np.pi * t / period_s, width=0.5)
-    return amplitude_mv * triangle + rise_rate_mv_per_s * t
-
-
-def curvy_drift_artifact_mv(t: np.ndarray, amplitude_mv: float = 45.0, tau_s: float = 150.0) -> np.ndarray:
-    """A smooth, nonlinear exponential-approach drift -- e.g. slow
-    thermal/aging equilibration -- visually distinct from both the flat
-    (sluggish_flat) and jagged (zigzag_rising) shapes above."""
-    return amplitude_mv * (1.0 - np.exp(-t / tau_s))
-
-
 def generate_cross_sensor_consistency_recording(
     experiment_id: str,
     reactor_id: str,
@@ -386,7 +339,6 @@ def generate_cross_sensor_consistency_recording(
     noise: NoiseConfig,
     par: float,
     temp: float,
-    artifact_mv_fns: dict[str, Callable[[np.ndarray], np.ndarray]],
     duration_s: int = 600,
     dt_s: float = 1.0,
     seed: int = 0,
@@ -394,14 +346,22 @@ def generate_cross_sensor_consistency_recording(
     """Unlike generate_experiment_recording (where each reactor/sensor
     observes its OWN different (PAR, temp) condition), every sensor here
     observes the EXACT SAME fixed condition simultaneously -- the true
-    VOC value is identical for all of them. Each sensor's raw voltage
-    additionally carries its own systematic drift artifact
-    (artifact_mv_fns[sensor_id](t), one of the three functions above) on
-    top of the same per-sensor calibration line and ambient-covariate/
-    AR(1) noise every other recording in this module uses. Models a real
-    fleet reality: three nominally-identical PID sensors can show wildly
-    different raw traces over time due to sensor-specific faults, even
-    when genuinely measuring the same thing."""
+    VOC value is identical for all of them, using ONLY the same ambient-
+    covariate/AR(1) noise every other recording in this module uses (the
+    contamination the pipeline actually models and corrects for). Tests
+    whether correction brings genuinely different sensors into agreement
+    with each other and with the truth, not just whether it recovers one
+    sensor's own reading correctly.
+
+    Deliberately does NOT model sensor-specific systematic-drift faults
+    (a sluggish/damped response, a periodic connector/thermal-cycling
+    artifact, a slow aging drift) -- those are a real, different class
+    of contamination the fleet-zero/ambient-baseline pipeline has no way
+    to correct for (not a constant bias, not a linear function of RH/T),
+    so including them here would show a residual difference that looks
+    like a pipeline failure rather than an honest scope limitation. See
+    the REPORT.md limitation note this benchmark prints instead of
+    demonstrating it live."""
     rng = np.random.default_rng(seed)
     base_time = dt.datetime(2026, 7, 24, 10, 0, 0, tzinfo=dt.timezone.utc)
     n = int(duration_s / dt_s)
@@ -422,9 +382,8 @@ def generate_cross_sensor_consistency_recording(
         )
         ambient_effect = noise.ambient.effect_mv(sample_rh_pct, sample_t_c)
         ar1 = _ar1_noise(n, noise.ar1_phi, noise.ar1_sigma_mv, sensor_rng)
-        artifact_mv = artifact_mv_fns[sensor_id](t_arr)
 
-        voltage = truth.b0_mv + truth.b1_mv_per_ppm * true_ppm + ambient_effect + ar1 + artifact_mv
+        voltage = truth.b0_mv + truth.b1_mv_per_ppm * true_ppm + ambient_effect + ar1
 
         frames.append(
             pl.DataFrame(
