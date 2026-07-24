@@ -6,6 +6,7 @@ foreground) together, against real hardware.
 from __future__ import annotations
 
 import datetime as dt
+import os
 import threading
 import time
 from pathlib import Path
@@ -225,6 +226,20 @@ def start(
 
     stop_event = threading.Event()
 
+    """
+    A raw, direct file write (not click.echo/logging) for shutdown
+    diagnostics -- bypasses stdout/systemd-journal capture entirely, so it
+    can't be lost to output buffering or signal-handling teardown timing,
+    only to the process being killed before this exact line runs. Explicit
+    flush()+fsync() so even a hard kill immediately after this call still
+    leaves the write durably on disk.
+    """
+    def _debug_log(message: str) -> None:
+        with open("/tmp/algaesense_shutdown_debug.log", "a") as f:
+            f.write(f"{dt.datetime.now(dt.timezone.utc).isoformat()} {message}\n")
+            f.flush()
+            os.fsync(f.fileno())
+
     def acquisition_loop() -> None:
         """A plain background thread running two independent schedules
         (VOC ~every second, camera every camera_interval_min) -- simple
@@ -256,9 +271,9 @@ def start(
             ~1 Hz VOC sampling.
             """
             stop_event.wait(1.0)
-        click.echo("acquisition_loop: stop_event set, flushing writers...")
+        _debug_log("acquisition_loop: stop_event set, entering service.close()")
         service.close()
-        click.echo("acquisition_loop: writers flushed, thread exiting.")
+        _debug_log("acquisition_loop: service.close() returned, thread exiting")
 
     acquisition_thread = threading.Thread(target=acquisition_loop, daemon=True)
     acquisition_thread.start()
@@ -270,10 +285,11 @@ def start(
         """
         uvicorn.run(create_app(state), host=host, port=port)
     finally:
-        click.echo("uvicorn.run() returned, signaling acquisition thread to stop...")
+        _debug_log("main thread: uvicorn.run() returned, entering finally block")
         stop_event.set()
+        _debug_log("main thread: stop_event.set() done, calling acquisition_thread.join(timeout=5.0)")
         acquisition_thread.join(timeout=5.0)
-        click.echo(f"acquisition_thread.join() returned, still alive={acquisition_thread.is_alive()}")
+        _debug_log(f"main thread: join() returned, acquisition_thread still alive={acquisition_thread.is_alive()}")
 
 
 @cli.command("scan-i2c")
