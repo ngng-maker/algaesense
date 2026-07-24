@@ -9,15 +9,21 @@ from mcp.server.fastmcp import FastMCP
 
 from algaesense_agent.labwiki.lint import lint_labwiki
 from algaesense_agent.labwiki.models import ExperimentResult
-from algaesense_agent.labwiki.wiki import ingest_experiment_result, query_labwiki
+from algaesense_agent.labwiki.wiki import ingest_experiment_result, query_labwiki, render_summary_page
 
 
 """
-`ingest_experiment_result` is meant to be called automatically right after
-`mcp_pipeline`'s fit/suggest tools complete for an experiment (per the
-plan's Phase 2c design) -- it is idempotent (see wiki.py's entity/index
-update logic), so calling it again for the same experiment_id updates
-rather than duplicates.
+`apply_ingest_experiment` runs once `mcp_pipeline`'s fit/suggest tools
+complete for an experiment and the operator has confirmed the result --
+it is idempotent (see wiki.py's entity/index update logic), so calling it
+again for the same experiment_id updates rather than duplicates.
+`propose_ingest_experiment` (below) gives the operator something concrete
+to review first: labwiki entries are meant to hold a vetted analysis, not
+whatever the agent drafted on the first pass, so this follows the same
+propose/apply split every hardware-touching tool in this package already
+uses, even though writing a markdown file has no hardware safety risk --
+the risk here is a wrong or premature conclusion getting baked into the
+knowledge base other experiments will later be reasoned over.
 """
 
 mcp = FastMCP("algaesense-labwiki")
@@ -35,8 +41,59 @@ def _wiki_root() -> Path:
     return Path(os.environ.get("ALGAESENSE_LABWIKI_ROOT", "data/labwiki"))
 
 
+def _build_result(
+    experiment_id: str,
+    campaign_id: str,
+    reactor_id: str,
+    sensor_id: str,
+    conditions: dict[str, float],
+    target_metrics: dict[str, float],
+    fit_expression: str | None,
+    active_learning_proposal: dict | None,
+    operator_notes: list[str] | None,
+) -> ExperimentResult:
+    return ExperimentResult(
+        experiment_id=experiment_id,
+        campaign_id=campaign_id,
+        reactor_id=reactor_id,
+        sensor_id=sensor_id,
+        conditions=conditions,
+        target_metrics=target_metrics,
+        fit_expression=fit_expression,
+        active_learning_proposal=active_learning_proposal,
+        operator_notes=operator_notes or [],
+    )
+
+
 @mcp.tool()
-def ingest_experiment(
+def propose_ingest_experiment(
+    experiment_id: str,
+    campaign_id: str,
+    reactor_id: str,
+    sensor_id: str,
+    conditions: dict[str, float],
+    target_metrics: dict[str, float],
+    fit_expression: str | None = None,
+    active_learning_proposal: dict | None = None,
+    operator_notes: list[str] | None = None,
+) -> dict:
+    """Preview the labwiki summary page this experiment would produce --
+    writes NOTHING yet. Show `preview_summary_markdown` to the operator for
+    review/edits (especially `fit_expression`/`operator_notes`, the
+    AI-drafted parts); once they confirm, call `apply_ingest_experiment`
+    with the same (or edited) arguments to actually save it."""
+    result = _build_result(
+        experiment_id, campaign_id, reactor_id, sensor_id, conditions, target_metrics,
+        fit_expression, active_learning_proposal, operator_notes,
+    )
+    return {
+        "preview_summary_markdown": render_summary_page(result),
+        "note": "Not yet saved to labwiki -- confirm with the operator, then call apply_ingest_experiment with the same (or edited) arguments.",
+    }
+
+
+@mcp.tool()
+def apply_ingest_experiment(
     experiment_id: str,
     campaign_id: str,
     reactor_id: str,
@@ -48,18 +105,12 @@ def ingest_experiment(
     operator_notes: list[str] | None = None,
 ) -> dict:
     """Record one completed experiment's result into the labwiki: writes
-    its raw source and updates the summary, entity, index, and log
-    pages."""
-    result = ExperimentResult(
-        experiment_id=experiment_id,
-        campaign_id=campaign_id,
-        reactor_id=reactor_id,
-        sensor_id=sensor_id,
-        conditions=conditions,
-        target_metrics=target_metrics,
-        fit_expression=fit_expression,
-        active_learning_proposal=active_learning_proposal,
-        operator_notes=operator_notes or [],
+    its raw source and updates the summary, entity, index, and log pages.
+    Only call this after the operator has reviewed `propose_ingest_experiment`'s
+    preview and confirmed (or edited) it."""
+    result = _build_result(
+        experiment_id, campaign_id, reactor_id, sensor_id, conditions, target_metrics,
+        fit_expression, active_learning_proposal, operator_notes,
     )
     summary = ingest_experiment_result(result, wiki_root=_wiki_root())
     return {

@@ -100,10 +100,12 @@ def _write_raw_source(result: ExperimentResult, wiki_root: Path) -> Path:
     return path
 
 
-def _write_summary_page(result: ExperimentResult, wiki_root: Path) -> Path:
-    summaries_dir = _wiki_dir(wiki_root, result.campaign_id) / "summaries"
-    summaries_dir.mkdir(parents=True, exist_ok=True)
-    path = summaries_dir / f"{result.experiment_id}.md"
+def render_summary_page(result: ExperimentResult) -> str:
+    """The exact markdown `_write_summary_page` persists, computed with no
+    filesystem write -- shared by the real write path and by
+    `labwiki/server.py`'s `propose_ingest_experiment` preview tool, so a
+    human reviewing a preview sees precisely what would be saved, not a
+    separately-maintained approximation of it."""
 
     conditions_lines = "\n".join(f"- {k}: {v}" for k, v in result.conditions.items()) or "- (none recorded)"
     results_lines = "\n".join(f"- {k}: {v}" for k, v in result.target_metrics.items()) or "- (none recorded)"
@@ -117,8 +119,7 @@ def _write_summary_page(result: ExperimentResult, wiki_root: Path) -> Path:
     lint/query pass) can follow "which page does this reference" without
     needing a separate link database.
     """
-    path.write_text(
-        f"""# Experiment {result.experiment_id}
+    return f"""# Experiment {result.experiment_id}
 
 - Campaign: [[{result.campaign_id}]]
 - Reactor: [[{result.reactor_id}]]
@@ -139,10 +140,14 @@ def _write_summary_page(result: ExperimentResult, wiki_root: Path) -> Path:
 ## Notes
 
 {notes_lines}
-""",
-        encoding="utf-8",
-    )
+"""
 
+
+def _write_summary_page(result: ExperimentResult, wiki_root: Path) -> Path:
+    summaries_dir = _wiki_dir(wiki_root, result.campaign_id) / "summaries"
+    summaries_dir.mkdir(parents=True, exist_ok=True)
+    path = summaries_dir / f"{result.experiment_id}.md"
+    path.write_text(render_summary_page(result), encoding="utf-8")
     return path
 
 

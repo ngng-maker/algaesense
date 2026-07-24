@@ -130,7 +130,7 @@ async def test_approved_proposal_reaches_the_edge_and_gets_ingested(tmp_path, wi
     assert wired_servers["edge_state"].led_actuators["R01"].read_par() == pytest.approx(proposed_par)
 
     ingest_result = await wired_servers["labwiki"].call_tool(
-        "ingest_experiment",
+        "apply_ingest_experiment",
         {
             "experiment_id": "exp_proposed_01",
             "campaign_id": "camp_01",

@@ -32,17 +32,21 @@ async def test_ingest_and_query_tools_round_trip_through_the_server(tmp_path: Pa
 
     importlib.reload(server_module)
 
-    ingest_result = await server_module.mcp.call_tool(
-        "ingest_experiment",
-        {
-            "experiment_id": "exp_01",
-            "campaign_id": "camp_01",
-            "reactor_id": "R01",
-            "sensor_id": "PID01",
-            "conditions": {"par_umol_m2_s": 200.0},
-            "target_metrics": {"mean_voc_ppm_asgas": 405.0},
-        },
-    )
+    experiment_args = {
+        "experiment_id": "exp_01",
+        "campaign_id": "camp_01",
+        "reactor_id": "R01",
+        "sensor_id": "PID01",
+        "conditions": {"par_umol_m2_s": 200.0},
+        "target_metrics": {"mean_voc_ppm_asgas": 405.0},
+    }
+
+    propose_result = await server_module.mcp.call_tool("propose_ingest_experiment", experiment_args)
+    propose_payload = _tool_payload(propose_result)
+    assert "par_umol_m2_s: 200.0" in propose_payload["preview_summary_markdown"]
+    assert not Path(tmp_path / "camp_01" / "wiki" / "summaries" / "exp_01.md").exists()
+
+    ingest_result = await server_module.mcp.call_tool("apply_ingest_experiment", experiment_args)
     ingest_payload = _tool_payload(ingest_result)
     assert Path(ingest_payload["summary_path"]).exists()
 

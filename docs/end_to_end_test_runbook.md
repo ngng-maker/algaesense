@@ -159,8 +159,16 @@ to say so rather than fabricate a fit.
 1. **Ingest this experiment's result into labwiki:**
    > *"Ingest the experiment we just ran into labwiki, with a note that [describe anything you actually observed -- e.g. 'VOC seemed to peak partway through the ramp']."*
 
-   Confirm Hermes calls `ingest_experiment` and reports back the campaign/
-   reactor/sensor pages it wrote or updated.
+   Confirm Hermes calls `propose_ingest_experiment` first and shows you the
+   draft `preview_summary_markdown` in chat -- it should read plainly as a
+   draft awaiting your review, not as something already saved. Give it a
+   thumbs-up as-is, or ask for an edit (a different note, a correction to
+   how it characterized the fit) and confirm Hermes incorporates it. Only
+   after you confirm should it call `apply_ingest_experiment` and report
+   back the campaign/reactor/sensor pages it wrote or updated. If it calls
+   `apply_ingest_experiment` straight away with no preview shown first,
+   that's a real prompting-compliance issue to flag (see `system_prompt.md`'s
+   "Reviewing results before saving them to labwiki").
 
 2. **Query labwiki directly, independent of any suggestion:**
    > *"What has labwiki recorded so far for R01/this campaign?"*
@@ -199,6 +207,21 @@ to say so rather than fabricate a fit.
    raises an error about `reactor_par_umol_m2_s` being null, that means PAR
    wasn't actually being recorded during this run (check the control profile
    was really started, per Step 5).
+
+6. **Close the loop: start the suggested experiment.**
+   > *"Okay, let's run that suggested condition."*
+
+   Confirm Hermes translates the suggestion's point (e.g.
+   `{"par_umol_m2_s": 250.0}`) into `propose_start_new_experiment_run`'s
+   `led_profile` argument (`{"shape": "constant", "par_umol_m2_s": 250.0}`),
+   shows you the proposal per the confirm-before-apply rule, and only calls
+   `apply_start_new_experiment_run` once you confirm -- this is the same
+   restart-and-relight mechanism from Step 2, just fed a value that came
+   from the active-learning suggestion instead of one you typed yourself.
+   There's no code-level helper doing this translation (see
+   `system_prompt.md`'s "Starting a suggested experiment") -- Hermes has to
+   do it in-context, so this step is testing prompting compliance, not a
+   guaranteed mechanism, the same caveat as step 4 above.
 
 ## If something breaks
 
