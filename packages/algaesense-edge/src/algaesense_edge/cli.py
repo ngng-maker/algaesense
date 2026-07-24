@@ -25,6 +25,25 @@ from algaesense_edge.api.state import AppState
 from algaesense_edge.service import AcquisitionService
 
 
+"""
+A raw, direct file write (not click.echo/logging) for shutdown
+diagnostics -- bypasses stdout/systemd-journal capture entirely, so it
+can't be lost to output buffering or signal-handling teardown timing,
+only to the process being killed before this exact line runs. Explicit
+flush()+fsync() so even a hard kill immediately after this call still
+leaves the write durably on disk. Module-level (not defined inside
+start()) so it can be called from the very top of start() too, to
+confirm the command function itself is entered on a given run.
+"""
+
+
+def _debug_log(message: str) -> None:
+    with open("/tmp/algaesense_shutdown_debug.log", "a") as f:
+        f.write(f"{dt.datetime.now(dt.timezone.utc).isoformat()} pid={os.getpid()} {message}\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
 @click.group()
 def cli() -> None:
     """algaesense-edge: Raspberry Pi sensor acquisition + actuator control."""
@@ -152,6 +171,8 @@ def start(
 ) -> None:
     """Start sensor acquisition and the network API together, against real hardware."""
 
+    _debug_log(f"start() entered, experiment={experiment!r}")
+
     """
     `--raw-data-dir` always stays this machine's *working* buffer -- a
     partial hour's rows always get written here first (writers need
@@ -226,20 +247,6 @@ def start(
 
     stop_event = threading.Event()
 
-    """
-    A raw, direct file write (not click.echo/logging) for shutdown
-    diagnostics -- bypasses stdout/systemd-journal capture entirely, so it
-    can't be lost to output buffering or signal-handling teardown timing,
-    only to the process being killed before this exact line runs. Explicit
-    flush()+fsync() so even a hard kill immediately after this call still
-    leaves the write durably on disk.
-    """
-    def _debug_log(message: str) -> None:
-        with open("/tmp/algaesense_shutdown_debug.log", "a") as f:
-            f.write(f"{dt.datetime.now(dt.timezone.utc).isoformat()} {message}\n")
-            f.flush()
-            os.fsync(f.fileno())
-
     def acquisition_loop() -> None:
         """A plain background thread running two independent schedules
         (VOC ~every second, camera every camera_interval_min) -- simple
@@ -278,14 +285,26 @@ def start(
     acquisition_thread = threading.Thread(target=acquisition_loop, daemon=True)
     acquisition_thread.start()
 
+    _debug_log("main thread: about to call uvicorn.run()")
     try:
         """
         Runs in the foreground (blocks) until interrupted (Ctrl-C) --
         acquisition keeps running on its own thread the whole time.
         """
         uvicorn.run(create_app(state), host=host, port=port)
+    except BaseException as exc:
+        """
+        Logs whatever propagated out of uvicorn.run() -- including
+        SystemExit/KeyboardInterrupt, which a bare `except Exception` would
+        miss -- before re-raising, so the shutdown-diagnostics file shows
+        WHY control reached here, not just that it did.
+        """
+        _debug_log(f"main thread: uvicorn.run() raised {type(exc).__name__}: {exc!r}")
+        raise
+    else:
+        _debug_log("main thread: uvicorn.run() returned normally (no exception)")
     finally:
-        _debug_log("main thread: uvicorn.run() returned, entering finally block")
+        _debug_log("main thread: entering finally block")
         stop_event.set()
         _debug_log("main thread: stop_event.set() done, calling acquisition_thread.join(timeout=5.0)")
         acquisition_thread.join(timeout=5.0)
