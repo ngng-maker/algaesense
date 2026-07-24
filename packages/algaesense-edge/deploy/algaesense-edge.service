@@ -19,6 +19,21 @@
 # section 7 for how to derive it); confirm --max-par against this reactor's
 # real safety ceiling before ever actually setting a PAR value above a low
 # test level.
+#
+# ExecStart uses `exec` inside the bash -c string -- CONFIRMED REAL BUG
+# without it (2026-07-24): `/bin/bash -c '<cmd>'` (no exec) leaves bash as a
+# separate parent process with algaesense-edge as its CHILD; systemd tracks
+# bash's PID as the unit's main process. Bash has no SIGTERM trap of its
+# own, so it can exit almost immediately on `systemctl restart`, and once
+# systemd sees the tracked main PID gone it can forcefully clean up the rest
+# of the cgroup -- killing the still-running Python child before it ever
+# gets to run its own graceful-shutdown code (the acquisition loop's
+# stop_event/service.close() flush never executed, confirmed via raw
+# file-write diagnostics that never got created, even though uvicorn's OWN
+# internal shutdown logged as clean). `exec` replaces bash with the Python
+# process in place (no fork, no separate child) -- there is exactly one
+# process, systemd tracks the real one, and its own signal handling
+# directly controls the unit's lifecycle with no race.
 
 [Unit]
 Description=AlgaeSense edge acquisition service
@@ -29,7 +44,7 @@ Wants=network-online.target
 Type=simple
 User=root
 WorkingDirectory=<PLACEHOLDER: absolute path to this repo on the Pi, e.g. /home/youruser/algaesense/algaesense>
-ExecStart=/bin/bash -c '<PLACEHOLDER: same absolute path as above>/.venv/bin/algaesense-edge start --experiment exp_$(date +%%Y-%%m-%%dT%%H-%%M-%%S) --reactor R01 --sensor PID01 --camera CAM01 --max-par 500 --par-per-full-duty 1.0 --led-gpio-pin 18 --led-num-pixels 40 --led-pixel-order BRG --voc-i2c-address 0x48'
+ExecStart=/bin/bash -c 'exec <PLACEHOLDER: same absolute path as above>/.venv/bin/algaesense-edge start --experiment exp_$(date +%%Y-%%m-%%dT%%H-%%M-%%S) --reactor R01 --sensor PID01 --camera CAM01 --max-par 500 --par-per-full-duty 1.0 --led-gpio-pin 18 --led-num-pixels 40 --led-pixel-order BRG --voc-i2c-address 0x48'
 Restart=on-failure
 RestartSec=5
 
