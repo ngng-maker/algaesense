@@ -140,3 +140,34 @@ def test_lint_labwiki_flags_an_orphaned_page(tmp_path: Path) -> None:
     warnings = lint_labwiki("camp_01", wiki_root=tmp_path)
 
     assert any("par_findings" in w for w in warnings)
+
+
+def test_lint_labwiki_reports_a_truncated_raw_file_instead_of_crashing(tmp_path: Path) -> None:
+    """The weekly audit runs this unattended -- one unreadable raw source
+    has to be reported and skipped, not abort the whole campaign's lint."""
+
+    ingest_experiment_result(_result("exp_01", 200.0, 405.0), wiki_root=tmp_path)
+
+    """
+    A raw file left truncated by a crash mid-write: parses as YAML (so it
+    gets past the YAMLError branch) but has none of the identity fields
+    the entity cross-check needs.
+    """
+    (tmp_path / "camp_01" / "raw" / "exp_truncated.yaml").write_text(
+        "experiment_id: exp_trunc", encoding="utf-8"
+    )
+
+    warnings = lint_labwiki("camp_01", wiki_root=tmp_path)
+
+    assert any("exp_truncated.yaml" in w and "malformed" in w for w in warnings)
+
+
+def test_ingesting_leaves_no_temp_file_behind(tmp_path: Path) -> None:
+    """The raw source is written via a .tmp sidecar then renamed -- the
+    sidecar must not survive a successful write."""
+
+    ingest_experiment_result(_result("exp_01", 200.0, 405.0), wiki_root=tmp_path)
+
+    raw_dir = tmp_path / "camp_01" / "raw"
+    assert (raw_dir / "exp_01.yaml").exists()
+    assert list(raw_dir.glob("*.tmp")) == []

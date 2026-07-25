@@ -6,7 +6,6 @@ foreground) together, against real hardware.
 from __future__ import annotations
 
 import datetime as dt
-import os
 import threading
 import time
 from pathlib import Path
@@ -23,25 +22,6 @@ from algaesense_edge.actuators.actuators import LEDActuator, create_hardware_led
 from algaesense_edge.api.app import create_app
 from algaesense_edge.api.state import AppState
 from algaesense_edge.service import AcquisitionService
-
-
-"""
-A raw, direct file write (not click.echo/logging) for shutdown
-diagnostics -- bypasses stdout/systemd-journal capture entirely, so it
-can't be lost to output buffering or signal-handling teardown timing,
-only to the process being killed before this exact line runs. Explicit
-flush()+fsync() so even a hard kill immediately after this call still
-leaves the write durably on disk. Module-level (not defined inside
-start()) so it can be called from the very top of start() too, to
-confirm the command function itself is entered on a given run.
-"""
-
-
-def _debug_log(message: str) -> None:
-    with open("/tmp/algaesense_shutdown_debug.log", "a") as f:
-        f.write(f"{dt.datetime.now(dt.timezone.utc).isoformat()} pid={os.getpid()} {message}\n")
-        f.flush()
-        os.fsync(f.fileno())
 
 
 @click.group()
@@ -171,8 +151,6 @@ def start(
 ) -> None:
     """Start sensor acquisition and the network API together, against real hardware."""
 
-    _debug_log(f"start() entered, experiment={experiment!r}")
-
     """
     `--raw-data-dir` always stays this machine's *working* buffer -- a
     partial hour's rows always get written here first (writers need
@@ -256,59 +234,94 @@ def start(
 
         next_camera_tick = time.monotonic()
         camera_interval_s = camera_interval_min * 60.0
-        while not stop_event.is_set():
-            service.run_voc_tick(dt.datetime.now(dt.timezone.utc))
-            if time.monotonic() >= next_camera_tick:
-                service.run_camera_tick(dt.datetime.now(dt.timezone.utc))
-                next_camera_tick = time.monotonic() + camera_interval_s
 
-            """
-            Runs every tick (same ~1 Hz cadence as VOC sampling), not just
-            once when a profile starts -- see AcquisitionService.tick_control_profiles.
-            """
-            profile_results = service.tick_control_profiles(dt.datetime.now(dt.timezone.utc))
-            for (reactor_id, actuator_kind), outcome in profile_results.items():
-                if outcome == "rejected":
-                    click.echo(
-                        f"{actuator_kind!r} control profile for reactor {reactor_id!r} rejected an "
-                        "unsafe setpoint; profile stopped and actuator turned off."
-                    )
+        """
+        Every step below is individually guarded, and `service.close()` sits
+        in a `finally`, for one reason: this thread is the ONLY thing writing
+        raw data, and an unhandled exception here kills it silently. The
+        FastAPI server runs on a different thread, so `/health` would keep
+        answering "ok" for days while nothing was actually being recorded --
+        and because `close()` used to sit after the loop rather than in a
+        `finally`, the whole buffered-but-unflushed hour went with it.
+        Every one of these calls can genuinely raise against real hardware:
+        `run_voc_tick` does an I2C read (OSError on a bus glitch),
+        `run_camera_tick` drives picamera2/ffmpeg (the "Device or resource
+        busy" failure documented in CLAUDE.md is exactly this shape).
+        Guarding each separately rather than the loop as a whole means a
+        failing camera can't stop 1 Hz VOC sampling, which is the primary
+        signal and far more robust than the camera path.
+        """
+        try:
+            while not stop_event.is_set():
+                try:
+                    service.run_voc_tick(dt.datetime.now(dt.timezone.utc))
+                except Exception as exc:
+                    click.echo(f"VOC tick failed, continuing: {exc!r}", err=True)
 
-            """
-            ~1 Hz VOC sampling.
-            """
-            stop_event.wait(1.0)
-        _debug_log("acquisition_loop: stop_event set, entering service.close()")
-        service.close()
-        _debug_log("acquisition_loop: service.close() returned, thread exiting")
+                if time.monotonic() >= next_camera_tick:
+                    """
+                    Reschedule BEFORE attempting, so a persistently broken
+                    camera retries once per normal interval instead of
+                    hammering every single tick.
+                    """
+                    next_camera_tick = time.monotonic() + camera_interval_s
+                    try:
+                        service.run_camera_tick(dt.datetime.now(dt.timezone.utc))
+                    except Exception as exc:
+                        click.echo(f"Camera tick failed, continuing: {exc!r}", err=True)
+
+                """
+                Runs every tick (same ~1 Hz cadence as VOC sampling), not just
+                once when a profile starts -- see AcquisitionService.tick_control_profiles.
+                """
+                try:
+                    profile_results = service.tick_control_profiles(dt.datetime.now(dt.timezone.utc))
+                    for (reactor_id, actuator_kind), outcome in profile_results.items():
+                        if outcome == "rejected":
+                            click.echo(
+                                f"{actuator_kind!r} control profile for reactor {reactor_id!r} rejected an "
+                                "unsafe setpoint; profile stopped and actuator turned off."
+                            )
+                except Exception as exc:
+                    click.echo(f"Control-profile tick failed, continuing: {exc!r}", err=True)
+
+                """
+                ~1 Hz VOC sampling.
+                """
+                stop_event.wait(1.0)
+        finally:
+            service.close()
 
     acquisition_thread = threading.Thread(target=acquisition_loop, daemon=True)
     acquisition_thread.start()
 
-    _debug_log("main thread: about to call uvicorn.run()")
     try:
         """
         Runs in the foreground (blocks) until interrupted (Ctrl-C) --
         acquisition keeps running on its own thread the whole time.
         """
         uvicorn.run(create_app(state), host=host, port=port)
-    except BaseException as exc:
-        """
-        Logs whatever propagated out of uvicorn.run() -- including
-        SystemExit/KeyboardInterrupt, which a bare `except Exception` would
-        miss -- before re-raising, so the shutdown-diagnostics file shows
-        WHY control reached here, not just that it did.
-        """
-        _debug_log(f"main thread: uvicorn.run() raised {type(exc).__name__}: {exc!r}")
-        raise
-    else:
-        _debug_log("main thread: uvicorn.run() returned normally (no exception)")
     finally:
-        _debug_log("main thread: entering finally block")
         stop_event.set()
-        _debug_log("main thread: stop_event.set() done, calling acquisition_thread.join(timeout=5.0)")
-        acquisition_thread.join(timeout=5.0)
-        _debug_log(f"main thread: join() returned, acquisition_thread still alive={acquisition_thread.is_alive()}")
+
+        """
+        The join timeout has to clear a whole camera tick, not just the ~1 Hz
+        VOC cadence: if the thread is mid-`record_clip` when the stop signal
+        arrives, it can't reach the flush until that recording finishes, and
+        `camera_capture_duration_s` alone can exceed a short timeout. Timing
+        out here would abandon the buffered rows the `finally` above exists
+        to save -- a daemon thread gets no chance to finish once the main
+        thread exits. Padding the clip duration covers encode/mux time on
+        top of the raw recording window.
+        """
+        shutdown_grace_s = camera_duration_s + 15.0
+        acquisition_thread.join(timeout=shutdown_grace_s)
+        if acquisition_thread.is_alive():
+            click.echo(
+                f"Acquisition thread did not finish flushing within {shutdown_grace_s:.0f}s; "
+                "this run's last buffered rows may be incomplete.",
+                err=True,
+            )
 
 
 @cli.command("scan-i2c")

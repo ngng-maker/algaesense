@@ -95,7 +95,21 @@ def _write_raw_source(result: ExperimentResult, wiki_root: Path) -> Path:
     reasoning as jaxsr_calibration.camera.calibration's persistence
     function.
     """
-    path.write_text(yaml.safe_dump(asdict(result), sort_keys=False), encoding="utf-8")
+
+    """
+    Write-to-temp-then-replace, the same pattern persist_calibration,
+    fleet_zero._write_result, PartitionedParquetWriter.flush and
+    mcp_calibration/sessions.py all use. It matters more here than
+    anywhere else: this raw source is the labwiki's immutable record, the
+    thing every derived page is rebuilt from and the only copy of an
+    experiment's result -- a crash partway through a plain write_text
+    leaves truncated YAML that `lint_labwiki` then trips over on every
+    subsequent run. `Path.replace()` is atomic on POSIX and NTFS alike
+    when source and destination share a directory.
+    """
+    tmp_path = path.with_suffix(".yaml.tmp")
+    tmp_path.write_text(yaml.safe_dump(asdict(result), sort_keys=False), encoding="utf-8")
+    tmp_path.replace(path)
 
     return path
 

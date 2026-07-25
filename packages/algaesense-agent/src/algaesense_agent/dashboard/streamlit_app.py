@@ -277,6 +277,12 @@ def _hermes_env_path() -> Path:
     return Path.home() / ".hermes" / ".env"
 
 
+# Cached because the Slack panel is an @st.fragment(run_every=3) -- without
+# this, every 3-second refresh re-read and re-parsed BOTH this file and
+# config.yaml once per key looked up (4 lookups = 8 file reads + 4 YAML
+# parses, forever). A 60s TTL still picks up a `hermes config set` while
+# the dashboard is open, without doing that work on every repaint.
+@st.cache_data(ttl=60)
 def _hermes_env_values() -> dict[str, str]:
     path = _hermes_env_path()
     if not path.exists():
@@ -297,6 +303,7 @@ def _hermes_env_values() -> dict[str, str]:
 # config.yaml instead (mixed in alongside the nested mcp_servers: block),
 # not under a slack: sub-key. Checking both files, in this order, is what
 # actually finds a given key rather than assuming .env alone is enough.
+@st.cache_data(ttl=60)
 def _hermes_config_values() -> dict[str, str]:
     path = _hermes_env_path().parent / "config.yaml"
     if not path.exists():
@@ -304,8 +311,14 @@ def _hermes_config_values() -> dict[str, str]:
     import yaml
 
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError:
+        return {}
+
+    # A config.yaml whose top level isn't a mapping (empty file -> None, or
+    # a stray list) would blow up on .items(); this panel is a convenience,
+    # so degrade to "no values found" rather than taking the page down.
+    if not isinstance(data, dict):
         return {}
     return {k: v for k, v in data.items() if isinstance(v, str)}
 

@@ -59,7 +59,27 @@ def _find_stale_entity_pages(campaign_id: str, wiki_root: Path) -> list[str]:
         return warnings
 
     for raw_path in sorted(raw_dir.glob("*.yaml")):
-        result = yaml.safe_load(raw_path.read_text(encoding="utf-8"))
+        """
+        A raw file that's empty, truncated, or missing its identity fields
+        is reported as its own warning rather than raising: this lint runs
+        unattended as the weekly audit (see weekly_cron_job.md), so one
+        unreadable file used to abort the entire campaign's audit with an
+        opaque KeyError/TypeError instead of flagging the actual problem
+        and checking everything else.
+        """
+        try:
+            result = yaml.safe_load(raw_path.read_text(encoding="utf-8"))
+        except yaml.YAMLError as exc:
+            warnings.append(f"unreadable raw source: raw/{raw_path.name} is not valid YAML ({exc.__class__.__name__})")
+            continue
+
+        if not isinstance(result, dict) or not {"experiment_id", "reactor_id", "sensor_id"} <= result.keys():
+            warnings.append(
+                f"malformed raw source: raw/{raw_path.name} is missing one of "
+                "experiment_id/reactor_id/sensor_id"
+            )
+            continue
+
         experiment_id = result["experiment_id"]
 
         for entity_id in (result["reactor_id"], result["sensor_id"]):
