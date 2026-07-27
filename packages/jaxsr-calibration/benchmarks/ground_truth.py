@@ -331,6 +331,223 @@ def generate_experiment_recording(
     return pl.concat(frames)
 
 
+"""
+============================================================================
+The TIME axis: how VOC gets to its plateau, and how fast.
+============================================================================
+
+`true_voc_ppm` above is the PLATEAU -- where VOC settles once the culture
+has fully adjusted to a (PAR, temp) setpoint. It says nothing about how
+long that takes, and a real week-long run spends its first day or two
+getting there.
+
+The approach law is a first-order lag, derived rather than assumed: at
+fixed conditions the culture's VOC production rate P is roughly constant
+and removal from a well-mixed headspace is proportional to concentration,
+so dC/dt = P - kC, which integrates to C(t) = (P/k)(1 - exp(-kt)). The
+plateau is P/k (= true_voc_ppm) and the time constant is tau = 1/k.
+
+TAU IS HOURS, NOT MINUTES, and that choice is load-bearing. A ~2-minute
+tau would be headspace gas-mixing time; over a 168-hour run that transient
+occupies the first 0.1% of the samples and is unrecoverable from noise
+(exactly the failure the 2026-07-24 static-PAR redesign hit). At week
+timescales the physically relevant process is photoacclimation -- the
+culture remodelling pigment and metabolism for new light/temperature --
+which in microalgae runs hours to days. ~12-22h gives 7-14 time constants
+per week-long run, so tau is comfortably identifiable from the data.
+"""
+
+TAU_BASE_H = 20.0
+"""Baseline photoacclimation time constant (hours) at PAR=0, temp=TEMP_REF."""
+TAU_PAR_H = 6.0
+"""Brighter light drives faster acclimation -- shares the SAME saturating
+PAR/(K_M+PAR) shape as the plateau's light term (more light speeds the
+response, with diminishing returns), so both surfaces need the same custom
+basis term and structural recovery is scored on equal footing."""
+TAU_TEMP_H_PER_C = 0.30
+"""Warmer runs acclimate faster (faster metabolism), cooler ones slower."""
+
+
+def true_tau_hours(par, temp):
+    """Ground-truth photoacclimation time constant (hours) for a static
+    (PAR, temp) setpoint -- the SECOND symbolic surface this benchmark
+    asks each method to recover, alongside the plateau.
+
+    tau(PAR, temp) = TAU_BASE_H
+                    - TAU_PAR_H * PAR / (K_M + PAR)     [brighter -> faster]
+                    - TAU_TEMP_H_PER_C * (temp - TEMP_REF)   [warmer -> faster]
+
+    Stays strictly positive across the whole declared domain (~11.8h at
+    PAR=500/temp=40, ~22.4h at PAR=0/temp=20).
+    """
+    par = np.asarray(par, dtype=float)
+    temp = np.asarray(temp, dtype=float)
+    light_term = TAU_PAR_H * par / (K_M + par)
+    temp_term = TAU_TEMP_H_PER_C * (temp - TEMP_REF)
+    return TAU_BASE_H - light_term - temp_term
+
+
+def true_voc_timeseries(t_s, par, temp):
+    """The true VOC concentration (ppm) at elapsed time t_s (seconds) into
+    a run held at a fixed (PAR, temp), starting from a freshly-reset
+    reactor at 0 ppm: plateau * (1 - exp(-t/tau))."""
+    t_s = np.asarray(t_s, dtype=float)
+    plateau = true_voc_ppm(par, temp)
+    tau_s = true_tau_hours(par, temp) * 3600.0
+    return plateau * (1.0 - np.exp(-t_s / tau_s))
+
+
+"""
+============================================================================
+Per-sensor ambient micro-environments (Part 1)
+============================================================================
+
+Three sensors watching the SAME reactor produce three completely
+different-LOOKING raw traces -- flat, haphazardly rising, and oscillating.
+The shapes differ because each sensor sits somewhere physically different:
+
+- "stable"  : a thermally quiet corner. Near-constant RH/T.
+- "warming" : bolted near a component that heats through the week, so its
+              own measured temperature ramps upward, with AR(1) roughness
+              making the rise irregular rather than a clean line.
+- "diurnal" : in an HVAC airflow, so its measured RH/T swing on a
+              24-hour day/night cycle.
+
+Every one of those differences is driven by the sensor's OWN MEASURED
+RH/T, which is precisely the contamination class fit_covariate_model
+characterizes and apply_covariate_correction removes. That is why the
+three can genuinely converge after correction -- not because the pipeline
+is magic, but because the shape differences are attributable to a measured
+covariate.
+
+The contrast case matters just as much: `drift_mv` injects the same three
+SHAPES as unexplained sensor drift with no covariate signature. Those are
+NOT correctable by anything in this pipeline (not a constant bias, not a
+linear function of RH/T), and Part 1 runs it as an explicit negative
+control so the boundary of the pipeline's competence is shown rather than
+asserted.
+"""
+
+AMBIENT_PROFILE_KINDS = ("stable", "warming", "diurnal")
+
+
+def ambient_micro_environment(kind: str, t_s: np.ndarray, noise: NoiseConfig, rng):
+    """Return (sample_rh_pct, sample_t_c) for one sensor's own housing,
+    as a real instrument would log them alongside its voltage."""
+    t_h = t_s / 3600.0
+
+    if kind == "stable":
+        rh = np.full(t_s.shape, noise.ambient.rh_ref_pct) + rng.normal(0.0, 0.3, size=t_s.shape)
+        temp = np.full(t_s.shape, noise.ambient.t_ref_c) + rng.normal(0.0, 0.1, size=t_s.shape)
+        return rh, temp
+
+    if kind == "warming":
+        """
+        A monotone ramp plus AR(1) wander -- 'haphazardly increasing'
+        rather than a clean straight line, which is what a real thermal
+        drift against a noisy room actually looks like.
+        """
+        span_h = max(t_h[-1], 1.0)
+        wander = _ar1_noise(t_s.size, 0.995, 0.05, rng)
+        temp = noise.ambient.t_ref_c - 2.0 + 7.0 * (t_h / span_h) + wander
+        rh = noise.ambient.rh_ref_pct - 5.0 + 10.0 * (t_h / span_h) + 0.5 * wander
+        return rh, temp
+
+    if kind == "diurnal":
+        phase = 2.0 * np.pi * t_h / 24.0
+        temp = noise.ambient.t_ref_c + noise.ambient_t_swing_c * np.sin(phase)
+        rh = noise.ambient.rh_ref_pct + noise.ambient_rh_swing_pct * np.sin(phase - 0.6)
+        return rh, temp
+
+    raise ValueError(f"unknown ambient micro-environment kind: {kind!r}")
+
+
+def uncorrectable_drift_mv(kind: str, t_s: np.ndarray, rng) -> np.ndarray:
+    """The negative control: the same three visual shapes as
+    `ambient_micro_environment`, but injected straight onto the voltage
+    with NO covariate signature -- nothing in the logged RH/T explains
+    them, so no amount of covariate correction can remove them."""
+    t_h = t_s / 3600.0
+    span_h = max(t_h[-1], 1.0)
+
+    if kind == "stable":
+        return np.full(t_s.shape, 12.0)
+    if kind == "warming":
+        return 25.0 * (t_h / span_h) + _ar1_noise(t_s.size, 0.995, 0.15, rng)
+    if kind == "diurnal":
+        return 18.0 * np.sin(2.0 * np.pi * t_h / 24.0)
+    raise ValueError(f"unknown drift kind: {kind!r}")
+
+
+def generate_week_long_sensor_recording(
+    experiment_id: str,
+    reactor_id: str,
+    sensor_ids: list[str],
+    sensor_environments: dict[str, str],
+    calibration_truth: dict[str, SensorCalibrationTruth],
+    noise: NoiseConfig,
+    par: float,
+    temp: float,
+    duration_s: int = 7 * 24 * 3600,
+    dt_s: float = 300.0,
+    inject_uncorrectable_drift: bool = False,
+    seed: int = 0,
+) -> pl.DataFrame:
+    """One week-long run at a fixed (PAR, temp), watched simultaneously by
+    several sensors that each sit in their own ambient micro-environment.
+
+    Every sensor observes the IDENTICAL true VOC(t) -- so any disagreement
+    between their raw traces is contamination by construction, and how
+    much of it survives correction is exactly what Part 1 measures.
+
+    Sampled every `dt_s` (5 min by default, 2016 points/week): far coarser
+    than the rig's real ~1 Hz VOC cadence, but a 12-22h time constant is
+    massively oversampled at 5 min, and a week at 1 Hz would be 604,800
+    rows per sensor carrying no additional information about tau.
+    """
+    rng = np.random.default_rng(seed)
+    base_time = dt.datetime(2026, 7, 24, 10, 0, 0, tzinfo=dt.timezone.utc)
+    n = int(duration_s / dt_s)
+    t_arr = np.arange(n) * dt_s
+    timestamps = [base_time + dt.timedelta(seconds=float(ti)) for ti in t_arr]
+
+    true_ppm = true_voc_timeseries(t_arr, par, temp)
+
+    frames = []
+    for sensor_id in sensor_ids:
+        truth = calibration_truth[sensor_id]
+        sensor_rng = np.random.default_rng(rng.integers(0, 2**31 - 1))
+        kind = sensor_environments[sensor_id]
+
+        sample_rh_pct, sample_t_c = ambient_micro_environment(kind, t_arr, noise, sensor_rng)
+        ambient_effect = noise.ambient.effect_mv(sample_rh_pct, sample_t_c)
+        ar1 = _ar1_noise(n, noise.ar1_phi, noise.ar1_sigma_mv, sensor_rng)
+
+        voltage = truth.b0_mv + truth.b1_mv_per_ppm * true_ppm + ambient_effect + ar1
+        if inject_uncorrectable_drift:
+            voltage = voltage + uncorrectable_drift_mv(kind, t_arr, sensor_rng)
+
+        frames.append(
+            pl.DataFrame(
+                {
+                    "timestamp": timestamps,
+                    "experiment_id": [experiment_id] * n,
+                    "sensor_id": [sensor_id] * n,
+                    "reactor_id": [reactor_id] * n,
+                    "pid_voltage_mv": voltage,
+                    "sample_t_c": sample_t_c,
+                    "sample_rh_pct": sample_rh_pct,
+                    "lamp_hours": np.full(n, 12.0),
+                    "reactor_par_umol_m2_s": np.full(n, par),
+                    "reactor_temp_c": np.full(n, temp),
+                    "true_voc_ppm": true_ppm,
+                }
+            )
+        )
+
+    return pl.concat(frames)
+
+
 def generate_cross_sensor_consistency_recording(
     experiment_id: str,
     reactor_id: str,
@@ -343,25 +560,16 @@ def generate_cross_sensor_consistency_recording(
     dt_s: float = 1.0,
     seed: int = 0,
 ) -> pl.DataFrame:
-    """Unlike generate_experiment_recording (where each reactor/sensor
-    observes its OWN different (PAR, temp) condition), every sensor here
-    observes the EXACT SAME fixed condition simultaneously -- the true
-    VOC value is identical for all of them, using ONLY the same ambient-
-    covariate/AR(1) noise every other recording in this module uses (the
-    contamination the pipeline actually models and corrects for). Tests
-    whether correction brings genuinely different sensors into agreement
-    with each other and with the truth, not just whether it recovers one
-    sensor's own reading correctly.
+    """Short-window, STATIC-VOC cross-sensor check retained for Test 1's
+    own numeric sub-test.
 
-    Deliberately does NOT model sensor-specific systematic-drift faults
-    (a sluggish/damped response, a periodic connector/thermal-cycling
-    artifact, a slow aging drift) -- those are a real, different class
-    of contamination the fleet-zero/ambient-baseline pipeline has no way
-    to correct for (not a constant bias, not a linear function of RH/T),
-    so including them here would show a residual difference that looks
-    like a pipeline failure rather than an honest scope limitation. See
-    the REPORT.md limitation note this benchmark prints instead of
-    demonstrating it live."""
+    Part 1 (sensor_consistency.py) supersedes this for the headline
+    convergence story: it runs a full week, gives each sensor its own
+    ambient micro-environment so the raw traces differ in SHAPE rather
+    than just phase, and drives a real time-varying VOC signal. This
+    one holds the true VOC constant over 10 minutes, which is a weaker
+    but still valid same-true-value agreement check.
+    """
     rng = np.random.default_rng(seed)
     base_time = dt.datetime(2026, 7, 24, 10, 0, 0, tzinfo=dt.timezone.utc)
     n = int(duration_s / dt_s)
@@ -466,6 +674,9 @@ above.
 """
 
 DYNAMIC_RELAXATION_TAU_S = 120.0
+"""Superseded by true_tau_hours (see simulate_true_dynamic_trajectory).
+Kept only because a few older call sites still import it; it is no longer
+what the trajectory integrator uses."""
 
 
 def simulate_true_dynamic_trajectory(
@@ -486,10 +697,21 @@ def simulate_true_dynamic_trajectory(
     par_values = np.array([par_fn(float(ti)) for ti in t])
     voc = np.empty(n)
     voc[0] = voc0
-    k = 1.0 / DYNAMIC_RELAXATION_TAU_S
+
+    """
+    tau is taken from `true_tau_hours(PAR(t), temp)` -- the SAME
+    photoacclimation surface Part 2 asks methods to recover -- rather
+    than a single fixed constant. That keeps one physics across the whole
+    benchmark: hold PAR constant and this integrates to exactly the
+    plateau*(1-exp(-t/tau)) curve Parts 1 and 2 use, while a time-varying
+    PAR(t) makes tau itself vary along the trajectory, which is what
+    gives Part 3 something real to discover.
+    """
     for i in range(1, n):
-        target = float(true_voc_ppm(par_values[i - 1], temp))
-        voc[i] = voc[i - 1] + dt_s * k * (target - voc[i - 1])
+        par_prev = par_values[i - 1]
+        target = float(true_voc_ppm(par_prev, temp))
+        tau_s = float(true_tau_hours(par_prev, temp)) * 3600.0
+        voc[i] = voc[i - 1] + dt_s * (target - voc[i - 1]) / tau_s
     return t, par_values, voc
 
 

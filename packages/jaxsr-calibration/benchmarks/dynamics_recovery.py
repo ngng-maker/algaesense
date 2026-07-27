@@ -71,9 +71,11 @@ from ground_truth import (
     generate_calibration_recording,
     generate_dynamic_experiment_recording,
     simulate_true_dynamic_trajectory,
+    true_tau_hours,
     true_voc_ppm,
 )
 
+from algaesense_edge.actuators.control_profiles import evaluate_control_profile
 from algaesense_agent.mcp_pipeline.pipeline import discover_led_response_dynamics
 from algaesense_agent.raw_readers import load_raw_voc_readings
 from jaxsr_calibration.calibration.apply import apply_calibration, persist_calibration
@@ -93,38 +95,41 @@ AMBIENT_BASELINE_RUN_ID = "benchmark_dynamics_ambient_01"
 TRUE_CALIBRATION = SensorCalibrationTruth(b0_mv=20.0, b1_mv_per_ppm=0.60)
 TEMP = 30.0
 
-PAR_LEVELS = [50.0, 175.0, 300.0, 450.0]
-"""Four fixed PAR levels spanning the domain -- 300 and 450 straddle
-PHOTO_THRESHOLD_PAR=380, so photoinhibition's effect on the steady-state
-target shows up in at least one level. Each becomes its own completely
-independent, long-running static-PAR experiment."""
+SINUSOID_PERIOD_S = 48 * 3600.0
+"""The LED drive period. Deliberately 48h and NOT 24h: Part 1 establishes
+a 24-hour diurnal ambient RH/T swing, and the covariate correction exists
+to remove exactly that. Driving the light on the same 24h period would
+make a genuine PAR effect and a residual ambient artifact nearly
+inseparable, so an apparent "success" could just be the algorithm
+latching onto the room's day/night cycle. A 48h drive against a 24h
+nuisance keeps them distinguishable. With tau ~12-22h the culture tracks
+a 48h cycle with a clear visible lag -- fast enough to respond, slow
+enough that the lag itself carries information."""
 
-DURATION_S = 7 * 24 * 3600  # >= 1 week, per the user's explicit request
-DT_S = 10.0
-"""10s sampling -- 12 samples per relaxation time constant (tau=120s),
-comfortably enough to resolve the relaxation curve without generating/
-fitting an unwieldy ~604,800-row-per-experiment dataset at full 1s
-resolution (a week at 1s would be 60x more data for no real gain in
-identifying a tau=120s decay)."""
-FIT_DECIMATION = 6
-"""Only every FIT_DECIMATION-th generated row is written to Parquet and
-fed into discover_led_response_dynamics's fit -- see the comment at its
-call site for why full-week-at-10s resolution isn't needed there."""
-PREDICT_DT_S = 15.0
-"""Step size for integrating the DISCOVERED equation forward for the
-predicted-trajectory overlay plot. MUST stay well below 2*DYNAMIC_RELAXATION_TAU_S
-(120s) for forward-Euler to remain numerically stable at all -- an
-earlier version of this constant was 300s (dt/tau=2.5 > 2), which meant
-even a PERFECTLY CORRECT discovered equation (a plain -1/tau decay)
-would diverge from pure Euler instability, not from any real problem
-with the discovered equation itself. 15s (dt/tau=0.125) is safely
-stable -- see _simulate_predicted_trajectory's own docstring."""
-PREDICT_DURATION_S = 3600.0
-"""How much of the trajectory to integrate/plot for the overlay --
-deliberately NOT the full DURATION_S week: the relaxation settles
-within a few minutes (tau=120s), so the rest of the week is flat
-steady-state with nothing left to compare. 1 hour comfortably shows the
-full transient with margin, at a fraction of the compute cost."""
+SINUSOID_PROFILE = {
+    "shape": "sinusoid",
+    "mean_par_umol_m2_s": 230.0,
+    "amplitude_par_umol_m2_s": 170.0,
+    "period_s": SINUSOID_PERIOD_S,
+}
+"""Swings PAR between 60 and 400 umol/m^2/s -- spanning the saturating
+region without crossing far into photoinhibition, and evaluated through
+the REAL evaluate_control_profile that drives the physical LED, not a
+re-implementation of the sine."""
+
+DURATION_S = 7 * 24 * 3600
+DT_S = 300.0
+"""5-minute sampling: ~2016 points/week. Massively oversampled against a
+12-22h time constant, and a week at the rig's real 1 Hz would be 604,800
+rows carrying no extra information about the dynamics."""
+
+FIT_DECIMATION = 1
+PREDICT_DT_S = 300.0
+PREDICT_DURATION_S = float(DURATION_S)
+"""Integrating the discovered equation at the same 5-min step over the
+full week. dt/tau ~ 0.007 at the fastest tau in range, comfortably inside
+forward-Euler stability (the 2026-07-24 round shipped dt/tau=2.5 and every
+predicted line diverged regardless of fit quality)."""
 
 
 def true_derivative(voc: np.ndarray, par: np.ndarray) -> np.ndarray:
@@ -132,7 +137,8 @@ def true_derivative(voc: np.ndarray, par: np.ndarray) -> np.ndarray:
     an arbitrary (voc, par) state -- not just along the one trajectory
     actually simulated, so this can score a model against a held-out
     grid the same way Test 1 does."""
-    return (1.0 / DYNAMIC_RELAXATION_TAU_S) * (true_voc_ppm(par, TEMP) - voc)
+    tau_s = np.asarray(true_tau_hours(par, TEMP), dtype=float) * 3600.0
+    return (true_voc_ppm(par, TEMP) - voc) / tau_s
 
 
 @dataclass
@@ -158,6 +164,10 @@ class ParLevelTrajectories:
     true_voc_values: np.ndarray
     t_predicted: np.ndarray
     predicted_voc_values: dict[str, np.ndarray]
+    par_values: np.ndarray | None = None
+    """The PAR(t) actually applied. Needed now that the drive varies
+    within the run -- under the old static-PAR design `par_level` alone
+    said everything there was to say."""
 
 
 @dataclass
@@ -263,25 +273,39 @@ def _discover_dynamics_from_readings(readings: pl.DataFrame, max_terms: int = 5,
     return result, state_names
 
 
-def _run_one_static_par_experiment(
-    par_level: float,
+def _run_sinusoid_experiment(
     seed: int,
     data_dir: Path,
     calibration_dir: Path,
     covariate_model,
     verbose: bool,
 ) -> tuple[dict[str, DynamicsRecoveryResult], ParLevelTrajectories]:
-    experiment_id = f"exp_dynamics_par_{par_level:.0f}"
+    experiment_id = "exp_dynamics_sinusoid"
 
+    """
+    The scoring/trajectory helpers below evaluate the discovered rate law
+    at ONE representative PAR. The drive's mean is the natural choice: it
+    is the centre of the range the run actually visits, so scoring there
+    is neither the easiest nor the hardest part of the trajectory.
+    """
+    par_level = float(SINUSOID_PROFILE["mean_par_umol_m2_s"])
+
+    """
+    PAR(t) comes from the REAL evaluate_control_profile -- the same
+    function the edge service runs every tick to drive the physical LED --
+    so the benchmark exercises the actual profile math rather than a
+    parallel re-implementation of a sine wave.
+    """
     t, par_values, true_voc_values = simulate_true_dynamic_trajectory(
-        lambda _t, p=par_level: p, TEMP, DURATION_S, dt_s=DT_S,
+        lambda elapsed: evaluate_control_profile(SINUSOID_PROFILE, elapsed),
+        TEMP, DURATION_S, dt_s=DT_S,
     )
 
     ambient_truth = AmbientCovariateTruth()
     noise = NoiseConfig(ambient=ambient_truth)
     readings = generate_dynamic_experiment_recording(
         experiment_id, REACTOR_ID, SENSOR_ID, par_values, TEMP, true_voc_values,
-        TRUE_CALIBRATION, noise, dt_s=DT_S, seed=seed + int(par_level),
+        TRUE_CALIBRATION, noise, dt_s=DT_S, seed=seed,
     )
 
     """
@@ -308,8 +332,8 @@ def _run_one_static_par_experiment(
         ambient_baseline_run_id=AMBIENT_BASELINE_RUN_ID,
     )
     if verbose:
-        print(f"  [PAR={par_level:.0f}, raw] equation: {real_raw_result.equations.get('ppm_asgas')}")
-        print(f"  [PAR={par_level:.0f}, corrected] equation: {real_corrected_result.equations.get('ppm_asgas')}")
+        print(f"  [sinusoid, raw] equation: {real_raw_result.equations.get('ppm_asgas')}")
+        print(f"  [sinusoid, corrected] equation: {real_corrected_result.equations.get('ppm_asgas')}")
 
     real_readings = load_raw_voc_readings(data_dir, experiment_id).filter(
         (pl.col("reactor_id") == REACTOR_ID) & (pl.col("sensor_id") == SENSOR_ID)
@@ -382,6 +406,7 @@ def _run_one_static_par_experiment(
     trajectories = ParLevelTrajectories(
         par_level=par_level, t=t[:n_plot], true_voc_values=true_voc_values[:n_plot],
         t_predicted=t_predicted, predicted_voc_values=predicted_voc_values,
+        par_values=par_values[:n_plot],
     )
     return results, trajectories
 
@@ -418,18 +443,16 @@ def run_dynamics_recovery_test(seed: int = 0, verbose: bool = True) -> DynamicsR
             data_dir / "derived" / "diagnostics" / "ambient_baseline",
         )
 
-        per_level_results: dict[float, dict[str, DynamicsRecoveryResult]] = {}
-        trajectories: dict[float, ParLevelTrajectories] = {}
-        for par_level in PAR_LEVELS:
-            if verbose:
-                print(f" PAR level {par_level:.0f} umol/m^2/s:")
-            results, traj = _run_one_static_par_experiment(
-                par_level, seed, data_dir, calibration_dir, covariate_model, verbose,
+        if verbose:
+            print(
+                f" sinusoid drive: {SINUSOID_PROFILE['mean_par_umol_m2_s']:.0f} "
+                f"+/- {SINUSOID_PROFILE['amplitude_par_umol_m2_s']:.0f} umol/m^2/s, "
+                f"period {SINUSOID_PERIOD_S / 3600:.0f} h, over {DURATION_S / 86400:.0f} days"
             )
-            per_level_results[par_level] = results
-            trajectories[par_level] = traj
-
-        return DynamicsRecoveryRun(per_level_results=per_level_results, trajectories=trajectories)
+        results, traj = _run_sinusoid_experiment(
+            seed, data_dir, calibration_dir, covariate_model, verbose,
+        )
+        return DynamicsRecoveryRun(per_level_results={"sinusoid": results}, trajectories={"sinusoid": traj})
 
 
 if __name__ == "__main__":

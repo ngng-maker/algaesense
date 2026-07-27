@@ -17,7 +17,7 @@ import numpy as np
 import polars as pl
 from scipy.stats import qmc
 
-from ground_truth import PAR_BOUNDS, TEMP_BOUNDS
+from ground_truth import TEMP_BOUNDS
 
 from algaesense_agent.labwiki.models import ExperimentResult
 from algaesense_agent.labwiki.wiki import ingest_experiment_result
@@ -27,34 +27,60 @@ from algaesense_agent.mcp_pipeline.pipeline import (
 )
 
 
+TRAIN_PAR_BOUNDS = (0.0, 420.0)
+"""The samplable PAR range. The rest of the declared domain
+(420-500 umol/m^2/s, see ground_truth.PAR_BOUNDS) is deliberately held
+out from EVERY method so held-out extrapolation error can be scored on
+territory none of them ever saw. Photoinhibition begins at 380, so
+training data contains a hint of the decline (380-420) and the held-out
+band tests whether a method extrapolated that decline correctly or just
+fit a surrogate that happens to work in-sample."""
+
+EXTRAP_PAR_BOUNDS = (420.0, 500.0)
+
 """
-suggest_next_experiments's search bounds default to the OBSERVED data's
-min/max (bound_overrides can only narrow that, never widen it -- see
-mcp_pipeline/pipeline.py's _apply_bound_overrides) -- confirmed
-directly while building this benchmark: seeding with only 2 clustered
-points left every subsequent active-learning suggestion permanently
-confined to that narrow observed range, never exploring the rest of
-the declared domain at all. A real practitioner wouldn't seed active
-learning with 2 arbitrary clustered points either -- they'd start from
-a small design that already spans the physical operating range, then
-let active learning refine within/around it. Four points near (not
-exactly on) the domain's corners give every method, including the DoE
-baselines that see all 10 points upfront, the same realistic starting
-information.
+The seed is deliberately a NARROW CLUSTER, and that choice is the whole
+point of the search_bounds comparison.
+
+suggest_next_experiments defaults its search range to the OBSERVED
+data's own min/max, and bound_overrides can only narrow that, never
+widen it (see mcp_pipeline/pipeline.py's _apply_bound_overrides). So an
+active-learning campaign seeded with a few clustered pilot runs stays
+permanently confined to that cluster -- a real, documented property of
+the tool, confirmed directly in this benchmark on 2026-07-22.
+
+That is exactly the situation a real campaign starts from: a handful of
+pilot runs near whatever setpoint seemed sensible, not a textbook design
+spanning the domain. "Ours (plain)" therefore represents NAIVE use of
+the tool from that realistic starting point; "Ours + labwiki
+search_bounds" represents INFORMED use, where prior knowledge of the
+safe operating envelope is handed to the learner explicitly. The gap
+between them is a genuine, actionable finding about how the tool has to
+be driven, not a strawman -- and the DoE baselines, which are told the
+full domain up front by construction (that is what declaring a design
+space means), are the fair yardstick for what that knowledge is worth.
 """
 SEED_POINTS: list[tuple[float, float]] = [
-    (40.0, 22.0),
-    (460.0, 22.0),
-    (40.0, 38.0),
-    (460.0, 38.0),
+    (190.0, 28.0),
+    (230.0, 28.0),
+    (190.0, 31.0),
+    (230.0, 31.0),
 ]
+
+DECLARED_SEARCH_BOUNDS = {
+    "par_umol_m2_s": (TRAIN_PAR_BOUNDS[0], TRAIN_PAR_BOUNDS[1]),
+    "mean_sample_t_c": (TEMP_BOUNDS[0], TEMP_BOUNDS[1]),
+}
+"""What labwiki supplies in the search_bounds-seeding variant: the known
+safe operating envelope, which the campaign's own first few runs happen
+not to span."""
 
 REACTOR_ID = "R01"
 SENSOR_ID = "PID01"
 
 
 def _scale_unit_points(unit_points: np.ndarray) -> list[tuple[float, float]]:
-    par = PAR_BOUNDS[0] + unit_points[:, 0] * (PAR_BOUNDS[1] - PAR_BOUNDS[0])
+    par = TRAIN_PAR_BOUNDS[0] + unit_points[:, 0] * (TRAIN_PAR_BOUNDS[1] - TRAIN_PAR_BOUNDS[0])
     temp = TEMP_BOUNDS[0] + unit_points[:, 1] * (TEMP_BOUNDS[1] - TEMP_BOUNDS[0])
     return list(zip(par.tolist(), temp.tolist()))
 
@@ -78,21 +104,31 @@ def grid_points(n_extra: int) -> list[tuple[float, float]]:
     benchmark's 10-experiment budget (4 seed + 6 extra)."""
     if n_extra != 6:
         raise ValueError("grid_points is hardcoded for n_extra=6 (a 3x2 layout)")
-    par_levels = np.linspace(PAR_BOUNDS[0], PAR_BOUNDS[1], 3)
+    par_levels = np.linspace(TRAIN_PAR_BOUNDS[0], TRAIN_PAR_BOUNDS[1], 3)
     temp_levels = np.linspace(TEMP_BOUNDS[0], TEMP_BOUNDS[1], 2)
     return [(float(par), float(temp)) for par in par_levels for temp in temp_levels]
 
 
 def random_points(n_extra: int, seed: int) -> list[tuple[float, float]]:
     rng = np.random.default_rng(seed)
-    par = rng.uniform(PAR_BOUNDS[0], PAR_BOUNDS[1], size=n_extra)
+    par = rng.uniform(TRAIN_PAR_BOUNDS[0], TRAIN_PAR_BOUNDS[1], size=n_extra)
     temp = rng.uniform(TEMP_BOUNDS[0], TEMP_BOUNDS[1], size=n_extra)
     return list(zip(par.tolist(), temp.tolist()))
 
 
 def _write_campaign_row(
-    data_dir: Path, campaign_id: str, experiment_index: int, par: float, temp: float, ppm: float
+    data_dir: Path,
+    campaign_id: str,
+    experiment_index: int,
+    par: float,
+    temp: float,
+    plateau_ppm: float,
+    tau_hours: float,
 ) -> None:
+    """One completed week-long run, reduced to the two scalars a symbolic
+    fit consumes: where VOC settled, and how fast it got there. Both are
+    written as ordinary campaign-feature columns so the real
+    suggest_next_experiments can target either one by name."""
     campaign_dir = data_dir / "derived" / "features" / campaign_id
     campaign_dir.mkdir(parents=True, exist_ok=True)
     experiment_id = f"exp_{experiment_index:02d}"
@@ -104,7 +140,8 @@ def _write_campaign_row(
         "par_umol_m2_s": float(par),
         "mean_sample_t_c": float(temp),
         "mean_sample_rh_pct": 55.0,
-        "mean_voc_ppm_asgas": float(ppm),
+        "mean_voc_ppm_asgas": float(plateau_ppm),
+        "tau_hours": float(tau_hours),
     }
     pl.DataFrame([row]).write_parquet(campaign_dir / f"{experiment_id}.parquet")
 
@@ -121,8 +158,8 @@ def run_fixed_design_campaign(
     non-adaptive design's incremental convergence."""
     all_points = SEED_POINTS + points
     for i, (par, temp) in enumerate(all_points):
-        ppm = measure_fn(par, temp)
-        _write_campaign_row(data_dir, campaign_id, i, par, temp, ppm)
+        plateau, tau = measure_fn(par, temp)
+        _write_campaign_row(data_dir, campaign_id, i, par, temp, plateau, tau)
     return all_points
 
 
@@ -136,6 +173,7 @@ def run_active_learning_campaign(
     labwiki_note_round: int | None = None,
     labwiki_note_text: str | None = None,
     bound_override_after_note: dict[str, tuple[float, float]] | None = None,
+    search_bounds: dict[str, tuple[float, float]] | None = None,
 ) -> list[tuple[float, float]]:
     """'Ours': the real suggest_next_experiments/_with_context tools
     pick one new point per round, informed by every experiment run so
@@ -150,8 +188,8 @@ def run_active_learning_campaign(
     chat."""
     all_points: list[tuple[float, float]] = list(SEED_POINTS)
     for i, (par, temp) in enumerate(SEED_POINTS):
-        ppm = measure_fn(par, temp)
-        _write_campaign_row(data_dir, campaign_id, i, par, temp, ppm)
+        plateau, tau = measure_fn(par, temp)
+        _write_campaign_row(data_dir, campaign_id, i, par, temp, plateau, tau)
 
     note_ingested = False
     for round_num in range(n_extra):
@@ -186,6 +224,7 @@ def run_active_learning_campaign(
                 kappa=2.0,
                 max_terms=5,
                 bound_overrides=bound_overrides,
+                search_bounds=search_bounds,
             ).suggestion
         else:
             result = suggest_next_experiments(
@@ -196,12 +235,13 @@ def run_active_learning_campaign(
                 n_points=1,
                 kappa=2.0,
                 max_terms=5,
+                search_bounds=search_bounds,
             )
 
         point = result.points[0]
         par, temp = point["par_umol_m2_s"], point["mean_sample_t_c"]
-        ppm = measure_fn(par, temp)
-        _write_campaign_row(data_dir, campaign_id, experiment_index, par, temp, ppm)
+        plateau, tau = measure_fn(par, temp)
+        _write_campaign_row(data_dir, campaign_id, experiment_index, par, temp, plateau, tau)
         all_points.append((par, temp))
 
     return all_points
