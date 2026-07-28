@@ -1,4 +1,4 @@
-"""Reading live sensor values off the edge service for the zero/span wizard.
+"""Reading live sensor values off the edge service for the calibration wizard.
 
 Split out of the Streamlit page rather than living inside it because a
 `streamlit run` script cannot be imported and patched by a test the way an

@@ -23,7 +23,7 @@ _HERE = Path(__file__).resolve().parent
 # opens by default.
 pages = [
     st.Page(str(_HERE / "streamlit_app.py"), title="Monitoring", icon="📈", default=True),
-    st.Page(str(_HERE / "zero_span_app.py"), title="Zero & span calibration", icon="🎯"),
+    st.Page(str(_HERE / "calibration_app.py"), title="Calibration", icon="🎯"),
 ]
 
 # expanded=True is load-bearing, not cosmetic: st.navigation defaults it to

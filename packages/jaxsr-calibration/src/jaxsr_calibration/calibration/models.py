@@ -150,6 +150,20 @@ class CalibrationGas:
         )
 
     @classmethod
+    def list_builtin(cls, overrides_path: Path | None = None) -> list[CalibrationGas]:
+        """Every compound in the response-factor table, alphabetically."""
+
+        """
+        `builtin(name)` can only answer a question the caller already knows
+        to ask. Anything offering a choice of calibration gas -- a wizard's
+        dropdown, a CLI's help text -- needs to enumerate the table
+        instead, which was previously impossible without reaching past this
+        class into the loader.
+        """
+        table = load_response_factor_table(overrides_path)
+        return [cls.builtin(name, overrides_path) for name in sorted(table)]
+
+    @classmethod
     def custom(cls, name: str, mw: float, response_factor: float | None = None, **kw) -> CalibrationGas:
         """Describe a compound that isn't in the built-in table."""
 
