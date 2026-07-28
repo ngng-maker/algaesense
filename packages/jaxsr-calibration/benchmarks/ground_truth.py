@@ -119,6 +119,43 @@ class SensorCalibrationTruth:
 
 
 @dataclass
+class SensorNoiseProfile:
+    """How this sensor's measurement noise scales with the concentration
+    being measured.
+
+    A single constant sigma is the wrong model for a PID: noise generally
+    grows with signal (shot noise, amplifier gain, flow variation), so
+    high-ppm points are intrinsically less precise than low-ppm ones. And
+    the growth rate is a property of the individual unit -- two sensors
+    from the same batch can share a sensitivity while differing in how
+    fast their precision degrades with concentration.
+
+    That matters for standard-addition calibration specifically.
+    `fit_sensitivity_per_sensor` offers `ols` and `robust` (Theil-Sen);
+    neither weights points by their variance, so with heteroscedastic
+    data the fit is dominated by whichever points happen to be noisiest.
+    A weighted least squares would be the textbook answer and does not
+    exist in the package -- so this profile is what makes that gap
+    measurable instead of hypothetical.
+    """
+
+    base_std_mv: float
+    """Noise floor at zero concentration -- electronics, not chemistry."""
+
+    std_per_ppm: float
+    """Additional noise per ppm. This is the term that makes the variance
+    profile sensor-specific."""
+
+    def std_at(self, ppm) -> np.ndarray:
+        return self.base_std_mv + self.std_per_ppm * np.asarray(ppm, dtype=float)
+
+
+DEFAULT_NOISE_PROFILE = SensorNoiseProfile(base_std_mv=0.3, std_per_ppm=0.0)
+"""Homoscedastic fallback -- reproduces the original constant-sigma
+behaviour exactly for callers that pass no profile."""
+
+
+@dataclass
 class AmbientCovariateTruth:
     """A genuine nuisance relationship between the sensor housing's own
     ambient RH/T and its raw voltage, independent of the reactor's
@@ -160,13 +197,21 @@ def generate_calibration_recording(
     response_factor: float = 0.63,
     n_per_level: int = 10,
     noise_std_mv: float = 0.3,
+    noise_profiles: dict[str, SensorNoiseProfile] | None = None,
     seed: int = 0,
 ) -> pl.DataFrame:
     """A clean, controlled standard-addition bench recording -- no
     ambient/common-mode contamination, matching how a real calibration
     is actually run (deliberately isolated from the reactor room). This
-    is what `fit_sensitivity_per_sensor` should recover `truth` from
-    almost exactly."""
+    is what `fit_sensitivity_per_sensor` should recover `truth` from.
+
+    A known gas is delivered at several KNOWN, VARYING concentrations
+    (`spike_ppm_list`) and each sensor reads every level. When
+    `noise_profiles` is given, each sensor's scatter grows with the
+    concentration according to its own SensorNoiseProfile, so the levels
+    are not equally informative and the sensors are not equally
+    well-calibrated -- which is the realistic case. Falls back to the
+    original constant `noise_std_mv` when omitted."""
     rng = np.random.default_rng(seed)
     base_time = dt.datetime(2026, 7, 22, 6, 0, 0, tzinfo=dt.timezone.utc)
 
@@ -182,7 +227,23 @@ def generate_calibration_recording(
     b0_arr = np.array([truth[s].b0_mv for s in sensor_id_arr])
     b1_arr = np.array([truth[s].b1_mv_per_ppm for s in sensor_id_arr])
 
-    noise = rng.normal(0.0, noise_std_mv, size=total_rows)
+    if noise_profiles is None:
+        sigma_arr = np.full(total_rows, noise_std_mv, dtype=float)
+    else:
+        sigma_arr = np.array(
+            [
+                noise_profiles.get(s_id, DEFAULT_NOISE_PROFILE).base_std_mv
+                + noise_profiles.get(s_id, DEFAULT_NOISE_PROFILE).std_per_ppm * ppm
+                for s_id, ppm in zip(sensor_id_arr, spike_ppm_arr)
+            ],
+            dtype=float,
+        )
+
+    """
+    Drawn per row from that row's OWN sigma -- this is what makes the
+    recording heteroscedastic rather than just noisy.
+    """
+    noise = rng.normal(0.0, sigma_arr)
     voltage = b0_arr + b1_arr * spike_ppm_arr + noise
 
     timestamps = [base_time + dt.timedelta(seconds=t) for t in range(total_rows)]

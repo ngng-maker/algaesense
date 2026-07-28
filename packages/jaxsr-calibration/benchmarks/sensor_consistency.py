@@ -49,6 +49,7 @@ from ground_truth import (
     AmbientCovariateTruth,
     NoiseConfig,
     SensorCalibrationTruth,
+    SensorNoiseProfile,
     generate_ambient_blank_recording,
     generate_calibration_recording,
     generate_week_long_sensor_recording,
@@ -76,6 +77,26 @@ TRUE_CALIBRATION = {
     "PID02": SensorCalibrationTruth(b0_mv=17.0, b1_mv_per_ppm=0.55),
     "PID03": SensorCalibrationTruth(b0_mv=23.0, b1_mv_per_ppm=0.65),
 }
+
+NOISE_PROFILES = {
+    "PID01": SensorNoiseProfile(base_std_mv=0.25, std_per_ppm=0.0006),
+    "PID02": SensorNoiseProfile(base_std_mv=0.30, std_per_ppm=0.0060),
+    "PID03": SensorNoiseProfile(base_std_mv=1.20, std_per_ppm=0.0008),
+}
+"""Three genuinely different variance profiles, chosen so the failure
+modes are distinguishable rather than just "one is worse":
+
+- PID01 is a good unit: low floor, barely degrades with concentration.
+- PID02 has a comparable floor but its precision falls apart at high
+  ppm (10x PID01's growth rate) -- at the 800 ppm calibration level its
+  scatter is ~5 mV against PID01's ~0.7 mV.
+- PID03 has a noisy floor (electronics) but scales well, so it is the
+  worst near zero and competitive at the top of the range.
+
+Because neither `ols` nor `robust` weights points by variance, PID02's
+high-concentration points carry the same influence as its precise
+low-concentration ones, and its recovered sensitivity should be the
+least trustworthy of the three."""
 
 FIXED_PAR = 250.0
 FIXED_TEMP = 30.0
@@ -123,6 +144,7 @@ class ConsistencyResult:
     traces: dict[str, SensorTrace] = field(default_factory=dict)
     raw_spread_ppm: float = 0.0
     corrected_spread_ppm: float = 0.0
+    calibration_summary: dict[str, dict[str, float]] = field(default_factory=dict)
 
     @property
     def spread_reduction_pct(self) -> float:
@@ -137,7 +159,9 @@ def _fit_pipeline_models(seed: int, calibration_dir: Path):
     covariate model. Both come from their own dedicated recordings, the
     way a real calibration/diagnostic run would."""
 
-    cal_df = generate_calibration_recording(SENSOR_IDS, TRUE_CALIBRATION, SPIKE_LEVELS, seed=seed)
+    cal_df = generate_calibration_recording(
+        SENSOR_IDS, TRUE_CALIBRATION, SPIKE_LEVELS, noise_profiles=NOISE_PROFILES, seed=seed
+    )
     sensitivity_models = fit_sensitivity_per_sensor(cal_df)
     persist_calibration(sensitivity_models, CALIBRATION_RUN_ID, "cal_experiment", calibration_dir)
 
@@ -160,6 +184,28 @@ def _fit_pipeline_models(seed: int, calibration_dir: Path):
     return sensitivity_models, covariate_models
 
 
+def calibration_recovery_summary(sensitivity_models) -> dict[str, dict[str, float]]:
+    """How well each sensor's sensitivity line was recovered, given that
+    each carries its own concentration-dependent variance profile."""
+    out: dict[str, dict[str, float]] = {}
+    for sensor_id, model in sensitivity_models.items():
+        true = TRUE_CALIBRATION[sensor_id]
+        profile = NOISE_PROFILES[sensor_id]
+        out[sensor_id] = {
+            "true_b1": true.b1_mv_per_ppm,
+            "recovered_b1": float(model.b1_mv_per_ppm_asgas),
+            "b1_pct_error": 100.0 * abs(model.b1_mv_per_ppm_asgas - true.b1_mv_per_ppm) / true.b1_mv_per_ppm,
+            "true_b0": true.b0_mv,
+            "recovered_b0": float(model.b0_mv),
+            "b1_stderr": float(model.b1_stderr),
+            "b1_rel_stderr_pct": 100.0 * float(model.b1_stderr) / float(model.b1_mv_per_ppm_asgas),
+            "r_squared": float(model.r_squared),
+            "sigma_at_zero_mv": profile.std_at(0.0).item(),
+            "sigma_at_top_mv": profile.std_at(max(SPIKE_LEVELS)).item(),
+        }
+    return out
+
+
 def run_consistency_case(
     case: str,
     seed: int = 0,
@@ -174,7 +220,8 @@ def run_consistency_case(
 
     with tempfile.TemporaryDirectory() as tmp:
         calibration_dir = Path(tmp) / "derived" / "calibrations" / "standard_addition"
-        _, covariate_models = _fit_pipeline_models(seed, calibration_dir)
+        sensitivity_models, covariate_models = _fit_pipeline_models(seed, calibration_dir)
+        calibration_summary = calibration_recovery_summary(sensitivity_models)
 
         recording = generate_week_long_sensor_recording(
             experiment_id="exp_sensor_consistency",
@@ -258,6 +305,7 @@ def run_consistency_case(
 
     result = ConsistencyResult(
         case=case,
+        calibration_summary=calibration_summary,
         elapsed_hours=[float(h) for h in elapsed_hours],
         true_ppm=[float(v) for v in true_ppm],
         traces=traces,
@@ -266,6 +314,13 @@ def run_consistency_case(
     )
 
     if verbose:
+        for sensor_id, c in calibration_summary.items():
+            print(
+                f"    calib[{sensor_id}]: b1 {c['recovered_b1']:.4f} vs true {c['true_b1']:.4f} "
+                f"({c['b1_pct_error']:.2f}% err, stderr {c['b1_rel_stderr_pct']:.2f}%, "
+                f"R2 {c['r_squared']:.5f}) | sigma {c['sigma_at_zero_mv']:.2f}->"
+                f"{c['sigma_at_top_mv']:.2f} mV over 0-{max(SPIKE_LEVELS):.0f} ppm"
+            )
         print(f"  [{case}] cross-sensor spread: raw={raw_spread:.2f} ppm -> corrected={corrected_spread:.2f} ppm")
         for sensor_id, trace in result.traces.items():
             print(

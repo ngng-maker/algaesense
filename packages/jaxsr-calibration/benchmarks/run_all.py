@@ -68,6 +68,8 @@ from ground_truth import (
 )
 from sensor_consistency import (
     FIXED_PAR,
+    NOISE_PROFILES,
+    SPIKE_LEVELS,
     FIXED_TEMP,
     SENSOR_ENVIRONMENTS,
     SENSOR_IDS,
