@@ -1,4 +1,7 @@
-"""Guided zero-and-span calibration for one sensor-reactor pair."""
+"""Guided zero-and-span calibration for one sensor-reactor pair.
+
+One page of the multi-page app whose entry point is `app.py`.
+"""
 
 # NOTE: this file is run via `streamlit run`, so it uses plain `#` comments
 # throughout rather than this project's usual triple-quoted rationale blocks.
@@ -62,7 +65,9 @@ def _capture_into(bucket: str, base_url: str) -> None:
 # Page
 # --------------------------------------------------------------------------
 
-st.set_page_config(page_title="Zero & span calibration", page_icon="🎯", layout="wide")
+# No st.set_page_config here: app.py owns it for the whole multi-page app,
+# and Streamlit only honours the first call.
+
 st.title("Zero & span calibration")
 st.caption(
     "Two-point calibration of one PID sensor on one reactor: record clean air, "

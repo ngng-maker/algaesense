@@ -107,7 +107,7 @@ The reason for splitting propose and apply into two separate code paths (rather 
    ```
    Add the `cloud` extra (`pip install -e "packages/jaxsr-calibration[cloud]"`) on any machine that will use the Firebase remote-storage backend — see [`docs/remote_storage_setup.md`](docs/remote_storage_setup.md); skip it if you're keeping raw data local or using the `local`-directory backend instead.
 5. **Calibrate your gas sensor** using the guided calibration wizard (ask the assistant in Slack to start a standard-addition calibration) before trusting any ppm readings.
-6. **Start an experiment** and begin watching readings — either through the assistant, or the live dashboard (`streamlit run packages/algaesense-agent/src/algaesense_agent/dashboard/streamlit_app.py`).
+6. **Start an experiment** and begin watching readings — either through the assistant, or the dashboard (`streamlit run packages/algaesense-agent/src/algaesense_agent/dashboard/app.py`), which has a Monitoring page and a Zero &amp; span calibration page in one sidebar.
 
 ## The live dashboard, and browsing past experiments
 

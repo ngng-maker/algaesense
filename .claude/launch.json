@@ -4,14 +4,8 @@
     {
       "name": "streamlit-dashboard",
       "runtimeExecutable": ".venv/Scripts/python.exe",
-      "runtimeArgs": ["-m", "streamlit", "run", "packages/algaesense-agent/src/algaesense_agent/dashboard/streamlit_app.py", "--server.port", "8501", "--server.headless", "true"],
+      "runtimeArgs": ["-m", "streamlit", "run", "packages/algaesense-agent/src/algaesense_agent/dashboard/app.py", "--server.port", "8501", "--server.headless", "true"],
       "port": 8501
-    },
-    {
-      "name": "streamlit-zero-span",
-      "runtimeExecutable": ".venv/Scripts/python.exe",
-      "runtimeArgs": ["-m", "streamlit", "run", "packages/algaesense-agent/src/algaesense_agent/dashboard/zero_span_app.py", "--server.port", "8502", "--server.headless", "true"],
-      "port": 8502
     }
   ]
 }

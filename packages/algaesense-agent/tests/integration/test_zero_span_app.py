@@ -22,13 +22,11 @@ from algaesense_agent.dashboard import zero_span_capture
 from jaxsr_calibration.calibration.apply import apply_calibration
 
 
-APP_PATH = str(
-    Path(__file__).resolve().parents[2]
-    / "src"
-    / "algaesense_agent"
-    / "dashboard"
-    / "zero_span_app.py"
+_DASHBOARD_DIR = (
+    Path(__file__).resolve().parents[2] / "src" / "algaesense_agent" / "dashboard"
 )
+APP_PATH = str(_DASHBOARD_DIR / "zero_span_app.py")
+COMBINED_APP_PATH = str(_DASHBOARD_DIR / "app.py")
 
 TRUE_B0 = 22.0
 TRUE_B1 = 0.58
@@ -85,6 +83,29 @@ def _walk_to_saved(tmp_path: Path) -> AppTest:
     at = at.run()
     at.button(key="zs_save").click()
     return at.run()
+
+
+def test_the_combined_dashboard_opens_on_monitoring() -> None:
+    """Calibration happens once at the start of a campaign; monitoring is
+    the daily view, so it is the one that should open by default."""
+    at = AppTest.from_file(COMBINED_APP_PATH, default_timeout=60).run()
+
+    assert not at.exception
+    assert any("AlgaeSense" in t.value for t in at.title)
+
+
+def test_the_combined_dashboard_navigates_to_calibration() -> None:
+    """Monitoring and calibration are two stages of one workflow, so they
+    have to be reachable from each other -- not two servers on two ports
+    the operator has to remember and start separately."""
+    at = AppTest.from_file(COMBINED_APP_PATH, default_timeout=60).run()
+
+    at.switch_page("zero_span_app.py")
+    at = at.run()
+
+    assert not at.exception
+    assert any("Zero & span calibration" in t.value for t in at.title)
+    assert at.session_state["zs_step"] == "Setup"
 
 
 def test_the_page_starts_on_setup_without_errors() -> None:

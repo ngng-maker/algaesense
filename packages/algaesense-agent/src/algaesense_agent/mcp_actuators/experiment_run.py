@@ -125,14 +125,19 @@ async def ensure_dashboard_running(dashboard_url: str, health_timeout_s: float =
         pass
 
     """
-    `algaesense_agent.dashboard.streamlit_app.__file__` resolves the
-    script's real installed path, rather than needing a separate
-    hardcoded/configured path to it -- this always matches whatever
-    version of the package is actually running this MCP server.
-    """
-    import algaesense_agent.dashboard.streamlit_app as streamlit_app_module
+    `algaesense_agent.dashboard.app.__file__` resolves the script's real
+    installed path, rather than needing a separate hardcoded/configured
+    path to it -- this always matches whatever version of the package is
+    actually running this MCP server.
 
-    script_path = Path(streamlit_app_module.__file__)
+    It has to be `app.py`, the multi-page entry point, and not one of the
+    individual pages: launching a page directly would start a dashboard
+    with no navigation, stranding the operator on whichever page happened
+    to be launched.
+    """
+    import algaesense_agent.dashboard.app as dashboard_app_module
+
+    script_path = Path(dashboard_app_module.__file__)
     port = parsed.port or 8501
 
     creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0

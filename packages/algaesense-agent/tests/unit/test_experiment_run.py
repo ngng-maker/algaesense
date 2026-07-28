@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import socket
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -295,6 +296,14 @@ async def test_ensure_dashboard_running_launches_streamlit_when_not_up(monkeypat
     assert "streamlit" in captured_args["args"]
     assert "run" in captured_args["args"]
     assert "59999" in captured_args["args"]
+
+    """
+    Must launch the multi-page entry point, not one of the pages. Starting
+    a page directly yields a dashboard with no navigation at all, stranding
+    whoever followed the Slack link on whichever page happened to launch.
+    """
+    script = next(a for a in captured_args["args"] if str(a).endswith(".py"))
+    assert Path(script).name == "app.py"
 
 
 @pytest.mark.asyncio

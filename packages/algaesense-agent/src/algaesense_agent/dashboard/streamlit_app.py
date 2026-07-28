@@ -1,7 +1,9 @@
 """Live operator dashboard: VOC + camera biomass readings streamed from a
 real algaesense-edge instance, plus a Slack panel to send commands to the
-AI agent -- run with `streamlit run streamlit_app.py`, not imported as a
-library module.
+AI agent.
+
+One page of the multi-page app whose entry point is `app.py` -- reached by
+`streamlit run app.py`, not imported as a library module.
 """
 
 from __future__ import annotations
@@ -40,7 +42,8 @@ from algaesense_agent.dashboard.history_db import (
 # Slack panel explains what env vars are still needed if Slack isn't wired
 # up yet -- neither blocks the other from working.
 
-st.set_page_config(page_title="AlgaeSense", layout="wide")
+# No st.set_page_config here: app.py owns it for the whole multi-page app,
+# and Streamlit only honours the first call.
 
 
 def _edge_base_url() -> str:
