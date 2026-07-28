@@ -34,7 +34,7 @@ def test_run_standard_addition_rejects_unimplemented_method_before_the_live_acqu
             experiment_id="exp_test",
             calibration_gas=gas,
             spike_ppm_list=[0.0, 1.0, 5.0, 20.0],
-            method="polynomial_deg2",
+            method="spline_deg5",
         )
 
 
@@ -154,7 +154,7 @@ def test_fit_sensitivity_per_sensor_rejects_unimplemented_methods() -> None:
         {"PID01": {"b0_mv": 1.0, "b1_mv_per_ppm": 4.0}}, spike_ppm_list=[0.0, 5.0], seed=37
     )
     with pytest.raises(NotImplementedError):
-        fit_sensitivity_per_sensor(df, method="polynomial_deg2")
+        fit_sensitivity_per_sensor(df, method="spline_deg5")
 
 
 def test_fit_sensitivity_per_sensor_robust_recovers_known_line() -> None:

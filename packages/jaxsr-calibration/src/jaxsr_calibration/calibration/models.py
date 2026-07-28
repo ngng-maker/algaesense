@@ -193,6 +193,7 @@ class SensitivityModel:
     """
     b1_mv_per_ppm_iso_equiv: float | None
 
+
     b1_stderr: float
     r_squared: float
     fit_method: Literal["ols", "robust", "polynomial_deg2"]
@@ -200,3 +201,13 @@ class SensitivityModel:
     mean_sample_rh_pct: float
     lamp_hours: float
     status: Literal["PASS", "SUSPECT", "FAIL"]
+
+    """
+    Quadratic coefficient, set only by the `polynomial_deg2` fit and None
+    for every linear method. Last in the field order because it is the
+    only optional one -- a defaulted dataclass field cannot precede
+    non-defaulted ones. Kept separate from b1 rather than folded into it
+    so existing readers of b0/b1 keep working unchanged, and so a stored
+    calibration shows at a glance whether curvature was ever fitted.
+    """
+    b2_mv_per_ppm2_asgas: float | None = None

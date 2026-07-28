@@ -83,6 +83,7 @@ def persist_calibration(
             "b0_mv": model.b0_mv,
             "b1_mv_per_ppm_asgas": model.b1_mv_per_ppm_asgas,
             "b1_mv_per_ppm_iso_equiv": model.b1_mv_per_ppm_iso_equiv,
+            "b2_mv_per_ppm2_asgas": model.b2_mv_per_ppm2_asgas,
             "b1_stderr": model.b1_stderr,
             "r_squared": model.r_squared,
             "status": model.status,
@@ -167,6 +168,11 @@ def load_calibration(calibration_run_id: str, data_dir: Path) -> dict[str, Sensi
     which is more readable here than iterating positionally and having to
     remember which numeric index corresponds to which field.
     """
+    """
+    `row.get("b2_mv_per_ppm2_asgas")` rather than `row[...]`: a calibration
+    written before curvature was supported has no such column, and those
+    files must keep loading as the linear fits they are rather than raising.
+    """
     for row in table.iter_rows(named=True):
         models[row["sensor_id"]] = SensitivityModel(
             sensor_id=row["sensor_id"],
@@ -174,6 +180,7 @@ def load_calibration(calibration_run_id: str, data_dir: Path) -> dict[str, Sensi
             b0_mv=row["b0_mv"],
             b1_mv_per_ppm_asgas=row["b1_mv_per_ppm_asgas"],
             b1_mv_per_ppm_iso_equiv=row["b1_mv_per_ppm_iso_equiv"],
+            b2_mv_per_ppm2_asgas=row.get("b2_mv_per_ppm2_asgas"),
             b1_stderr=row["b1_stderr"],
             r_squared=row["r_squared"],
             fit_method=row["fit_method"],
@@ -183,6 +190,43 @@ def load_calibration(calibration_run_id: str, data_dir: Path) -> dict[str, Sensi
             status=row["status"],
         )
     return models
+
+
+def _invert_quadratic_response(
+    voltage: np.ndarray, b0: float, b1: float, b2: float
+) -> np.ndarray:
+    """Solve `voltage = b0 + b1*ppm + b2*ppm^2` for ppm.
+
+    The quadratic has two roots and only one is physically meaningful: the
+    one on the increasing branch nearest zero concentration, since a real
+    PID response rises with concentration over its working range.
+
+    That is the `-b1 + sqrt(...)` root for BOTH signs of b2, which is
+    worth spelling out because the sign of b2 makes it look as though the
+    branch should flip. With b2 < 0 (the common case, a response
+    compressing at high concentration) the parabola opens downward with
+    its turning point far above the working range, and dividing by the
+    negative 2*b2 reverses the ordering so the `+` root is the SMALLER of
+    the two -- e.g. b0=20, b1=0.6, b2=-1.2e-4 at 400 ppm gives roots of
+    400 and 4600, and 400 is the `+` one. With b2 > 0 the `-` root is
+    negative and unphysical. Choosing per-sign, as an earlier version of
+    this function did, returns the 4600 in that example.
+    """
+    discriminant = b1**2 - 4.0 * b2 * (b0 - voltage)
+
+    """
+    A negative discriminant means the measured voltage lies beyond the
+    parabola's turning point -- physically, past the concentration where
+    the fitted response stops increasing, so no concentration on the valid
+    branch could have produced it. NaN says exactly that, rather than
+    inventing a value; `extrapolation_policy` then decides what the caller
+    sees. Silently clamping here would hide a sensor operating outside the
+    range it was calibrated over.
+    """
+    with np.errstate(invalid="ignore"):
+        root = np.sqrt(np.where(discriminant >= 0.0, discriminant, np.nan))
+
+    return (-b1 + root) / (2.0 * b2)
 
 
 def apply_calibration(
@@ -228,9 +272,19 @@ def apply_calibration(
     gas = model.calibration_gas
 
     b0, b1 = model.b0_mv, model.b1_mv_per_ppm_asgas
+    b2 = model.b2_mv_per_ppm2_asgas
     voltage_np = voltage.to_numpy()
 
-    ppm_asgas = (voltage_np - b0) / b1
+    """
+    A linear calibration inverts trivially. A quadratic one
+    (`polynomial_deg2`, fitted for sensors whose response bends) has to be
+    solved for concentration instead -- see _invert_quadratic_response.
+    """
+    if b2:
+        ppm_asgas = _invert_quadratic_response(voltage_np, b0, b1, b2)
+    else:
+        ppm_asgas = (voltage_np - b0) / b1
+
     ppm_asgas = _apply_extrapolation_policy(ppm_asgas, extrapolation_policy)
 
     """

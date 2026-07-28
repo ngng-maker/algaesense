@@ -56,7 +56,7 @@ checked at the earliest reachable point in each function below (before any
 live-acquisition raise or per-sensor loop), not merely wherever a fit is
 eventually attempted.
 """
-_IMPLEMENTED_METHODS = {"ols", "robust"}
+_IMPLEMENTED_METHODS = {"ols", "robust", "wls", "polynomial_deg2"}
 
 
 def run_standard_addition(
@@ -119,6 +119,7 @@ def fit_sensitivity_per_sensor(df: pl.DataFrame, method: str = "ols") -> dict[st
     for (sensor_id,), sensor_df in df.partition_by("sensor_id", as_dict=True).items():
         spike_ppm = sensor_df["spike_ppm_asgas"].to_numpy()
         voltage = sensor_df["pid_voltage_mv"].to_numpy()
+        b2: float | None = None
 
         if len(np.unique(spike_ppm)) < 2:
             raise ValueError(
@@ -139,6 +140,49 @@ def fit_sensitivity_per_sensor(df: pl.DataFrame, method: str = "ols") -> dict[st
             """
             b1_stderr = float(result.bse[1])
             r_squared = float(result.rsquared)
+        elif method == "wls":
+            """
+            Weighted least squares, for the realistic case where a PID's
+            scatter GROWS with the concentration being measured (shot
+            noise and amplifier gain both scale with signal). Plain OLS
+            assumes every point is equally trustworthy, so it lets the
+            noisy high-concentration readings pull the slope as hard as
+            the precise low-concentration ones.
+
+            Weights come from the data itself: standard addition takes
+            several replicates at each level, so the scatter WITHIN each
+            level is a direct empirical estimate of that level's variance,
+            with no assumed noise model. Weighting by its reciprocal is
+            the textbook correction.
+            """
+            weights = _inverse_variance_weights(spike_ppm, voltage)
+            design = sm.add_constant(spike_ppm)
+            result = sm.WLS(voltage, design, weights=weights).fit()
+            b0, b1 = result.params
+            b1_stderr = float(result.bse[1])
+            r_squared = float(result.rsquared)
+
+        elif method == "polynomial_deg2":
+            """
+            A quadratic response curve, for sensors whose output bends
+            rather than running straight -- PID response commonly
+            compresses at high concentration as the lamp cannot ionise
+            fast enough. Fitting such a sensor with a straight line leaves
+            a systematic error that is worst at both ends of the range and
+            best in the middle, which is easy to mistake for a good
+            calibration if only the mid-range is checked.
+
+            b1 remains the LINEAR coefficient, so everything downstream
+            that reads b1 keeps its meaning; the curvature lives in the
+            separate b2 field, and apply_calibration inverts the full
+            quadratic when it is present.
+            """
+            design = np.column_stack([np.ones_like(spike_ppm), spike_ppm, spike_ppm**2])
+            result = sm.OLS(voltage, design).fit()
+            b0, b1, b2 = result.params
+            b1_stderr = float(result.bse[1])
+            r_squared = float(result.rsquared)
+
         else:
             """
             Theil-Sen: a median-of-pairwise-slopes estimator, far less
@@ -167,6 +211,7 @@ def fit_sensitivity_per_sensor(df: pl.DataFrame, method: str = "ols") -> dict[st
             calibration_gas=gas,
             b0_mv=float(b0),
             b1_mv_per_ppm_asgas=float(b1),
+            b2_mv_per_ppm2_asgas=None if b2 is None else float(b2),
             b1_mv_per_ppm_iso_equiv=b1_iso_equiv,
             b1_stderr=b1_stderr,
             r_squared=r_squared,
@@ -178,6 +223,35 @@ def fit_sensitivity_per_sensor(df: pl.DataFrame, method: str = "ols") -> dict[st
         )
 
     return results
+
+
+def _inverse_variance_weights(spike_ppm: np.ndarray, voltage: np.ndarray) -> np.ndarray:
+    """One weight per reading: the reciprocal of the empirical variance of
+    the level that reading belongs to.
+
+    Estimated per level rather than from an assumed noise model, so it
+    adapts to whatever variance profile the sensor actually has instead of
+    imposing one.
+    """
+    weights = np.ones_like(voltage, dtype=float)
+
+    for level in np.unique(spike_ppm):
+        at_level = spike_ppm == level
+        variance = float(np.var(voltage[at_level], ddof=1)) if at_level.sum() > 1 else 0.0
+
+        """
+        A level with one replicate, or with replicates that happen to land
+        identically, gives no usable variance estimate. Falling back to
+        the pooled variance keeps that level in the fit at average weight
+        rather than either dropping it or handing it infinite influence.
+        """
+        if variance <= 0.0:
+            pooled = float(np.var(voltage, ddof=1))
+            variance = pooled if pooled > 0.0 else 1.0
+
+        weights[at_level] = 1.0 / variance
+
+    return weights
 
 
 def _classify(r_squared: float) -> str:
