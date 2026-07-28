@@ -15,7 +15,9 @@ from pathlib import Path
 import altair as alt
 import httpx
 import pandas as pd
+import polars as pl
 import streamlit as st
+from jaxsr_calibration.calibration.apply import apply_calibration
 from jaxsr_calibration.camera.calibration import BiomassCameraModel, apply_biomass_calibration, load_biomass_calibration
 
 # NOTE ON COMMENT STYLE IN THIS FILE: Streamlit's "magic commands" feature
@@ -92,6 +94,40 @@ def _data_dir() -> Path:
     return Path(os.environ.get("ALGAESENSE_DATA_DIR", "."))
 
 
+def _calibrated_voc_ppm(voc_rows: list[dict], calibration_run_id: str) -> list[float] | None:
+    # Converts raw millivolts through a saved VOC calibration -- the one
+    # produced by the zero/span wizard, or by a multi-level standard
+    # addition through Slack. Both land in the same place under a
+    # calibration_run_id, so either works here.
+    #
+    # Returns None (rather than raising) on any failure, so a mistyped or
+    # missing run id degrades to the labelled placeholder instead of
+    # taking down the whole live view. The caller says which happened.
+    if not voc_rows:
+        return None
+    sensor_id = voc_rows[0].get("sensor_id")
+    if not sensor_id:
+        return None
+
+    try:
+        # sample_t_c/sample_rh_pct are part of apply_calibration's
+        # signature but are not yet used to adjust the slope, so the nulls
+        # this project still records for them (no T/RH sensor fitted) are
+        # harmless here.
+        height = len(voc_rows)
+        ppm, _, _ = apply_calibration(
+            pl.Series([row["pid_voltage_mv"] for row in voc_rows]),
+            sensor_id,
+            pl.Series([row.get("sample_t_c") for row in voc_rows], dtype=pl.Float64),
+            pl.Series([row.get("sample_rh_pct") for row in voc_rows], dtype=pl.Float64),
+            calibration_run_id,
+            data_dir=_data_dir() / "derived" / "calibrations" / "standard_addition",
+        )
+        return [float(v) for v in ppm][:height]
+    except Exception:
+        return None
+
+
 def _load_camera_calibration(calibration_run_id: str) -> BiomassCameraModel | None:
     # Returns None (rather than raising) on any failure -- a missing or
     # unreadable calibration run shouldn't crash the whole dashboard, just
@@ -152,24 +188,47 @@ def _render_readings(voc_rows: list[dict], camera_rows: list[dict]) -> None:
     with voc_col:
         st.subheader("VOC (PID sensor)")
         if voc_rows:
-            # A real calibration_run_id (sidebar) would give a properly
-            # fitted ppm conversion (jaxsr_calibration.calibration.apply.
-            # apply_calibration) -- until one exists for this sensor, ppm
-            # values here use the rough placeholder linear scaling above,
-            # which is clearly labeled as such rather than presented as
-            # a real measurement.
-            ppm_values = [_voc_ppm_placeholder(row["pid_voltage_mv"]) for row in voc_rows]
-            st.metric("Latest reading (ppm, approx.)", f"{ppm_values[-1]:.2f}")
-            st.caption(
-                "Approximate placeholder conversion (linear across the sensor's stated "
-                "0-5 ppm range) -- run a standard-addition calibration via Slack for a real one."
+            # Prefer a real fitted calibration whenever the operator has
+            # named one; fall back to the labelled placeholder otherwise,
+            # so the chart never silently presents an approximation as a
+            # measurement or vice versa.
+            voc_calibration_run_id = st.session_state.get("voc_calibration_run_id", "").strip()
+            ppm_values = (
+                _calibrated_voc_ppm(voc_rows, voc_calibration_run_id) if voc_calibration_run_id else None
             )
+            calibrated = ppm_values is not None
+            if not calibrated:
+                ppm_values = [_voc_ppm_placeholder(row["pid_voltage_mv"]) for row in voc_rows]
+
+            st.metric(
+                "Latest reading (ppm)" if calibrated else "Latest reading (ppm, approx.)",
+                f"{ppm_values[-1]:.2f}",
+            )
+            if calibrated:
+                st.caption(f"Calibrated via `{voc_calibration_run_id}`.")
+            elif voc_calibration_run_id:
+                st.caption(
+                    f"Could not apply VOC calibration {voc_calibration_run_id!r} to this sensor -- "
+                    "showing the approximate placeholder conversion instead."
+                )
+            else:
+                st.caption(
+                    "Approximate placeholder conversion (linear across the sensor's stated "
+                    "0-5 ppm range) -- run the zero & span wizard, or a standard-addition "
+                    "calibration via Slack, then enter its id in the sidebar."
+                )
+
             # x-axis: seconds since this experiment's first VOC reading,
             # not a raw timestamp -- much easier to read at the ~1 Hz
-            # sampling rate this sensor actually runs at. Fixed y-axis
-            # domain [0, 5] (the sensor's stated range) needs an Altair
-            # chart -- st.line_chart auto-scales its axis and has no
-            # option to pin a fixed range.
+            # sampling rate this sensor actually runs at. Pinning the
+            # y-axis needs an Altair chart -- st.line_chart auto-scales
+            # and has no option to fix a range.
+            #
+            # The domain holds at the sensor's stated 0-5 ppm so charts
+            # stay comparable between sessions, but grows if a real
+            # calibration puts readings above it: clipping the axis to a
+            # nominal range would hide genuine data.
+            upper = max(_VOC_SENSOR_FULL_SCALE_PPM, max(ppm_values))
             df = pd.DataFrame(
                 {"seconds_since_start": _elapsed_seconds_since_start(voc_rows), "ppm": ppm_values}
             )
@@ -178,7 +237,11 @@ def _render_readings(voc_rows: list[dict], camera_rows: list[dict]) -> None:
                 .mark_line()
                 .encode(
                     x=alt.X("seconds_since_start", title="Seconds since start"),
-                    y=alt.Y("ppm", title="ppm (approx.)", scale=alt.Scale(domain=[0, _VOC_SENSOR_FULL_SCALE_PPM])),
+                    y=alt.Y(
+                        "ppm",
+                        title="ppm" if calibrated else "ppm (approx.)",
+                        scale=alt.Scale(domain=[0, upper]),
+                    ),
                 )
             )
             st.altair_chart(chart, use_container_width=True)
@@ -465,12 +528,21 @@ if "edge_base_url" not in st.session_state:
     st.session_state["edge_base_url"] = os.environ.get("ALGAESENSE_EDGE_BASE_URL", "http://localhost:8000")
 if "camera_calibration_run_id" not in st.session_state:
     st.session_state["camera_calibration_run_id"] = os.environ.get("ALGAESENSE_CAMERA_CALIBRATION_RUN_ID", "")
+if "voc_calibration_run_id" not in st.session_state:
+    st.session_state["voc_calibration_run_id"] = os.environ.get("ALGAESENSE_VOC_CALIBRATION_RUN_ID", "")
 
 with st.sidebar:
     st.text_input(
         "algaesense-edge URL",
         key="edge_base_url",
         help="The reactor's Raspberry Pi network API address, e.g. http://192.168.1.42:8000",
+    )
+    st.text_input(
+        "VOC calibration_run_id (optional)",
+        key="voc_calibration_run_id",
+        help="From a completed zero & span calibration (see the calibration page) or a "
+        "standard-addition calibration -- converts the live VOC chart to real ppm instead "
+        "of the approximate placeholder.",
     )
     st.text_input(
         "Camera calibration_run_id (optional)",

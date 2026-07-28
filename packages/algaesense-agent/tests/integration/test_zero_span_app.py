@@ -258,6 +258,59 @@ def test_the_saved_calibration_turns_a_raw_recording_into_correct_ppm(tmp_path: 
     assert np.max(np.abs(recovered - true_ppm)) < 1.5
 
 
+def test_the_monitoring_page_reports_real_ppm_from_the_wizards_calibration(tmp_path: Path) -> None:
+    """Closes the loop the wizard exists to close: a calibration saved on
+    the calibration page must change what the monitoring page displays,
+    rather than leaving it on the labelled placeholder forever."""
+    at = _walk_to_saved(tmp_path)
+    run_id = at.session_state["zs_session"].calibration_run_id
+
+    from algaesense_agent.dashboard import streamlit_app as monitoring
+
+    true_ppm = 120.0
+    voltage = TRUE_B0 + TRUE_B1 * true_ppm
+    rows = [{"sensor_id": "PID01", "pid_voltage_mv": voltage, "sample_t_c": None, "sample_rh_pct": None}]
+
+    monkeypatched_data_dir = tmp_path
+
+    """
+    _data_dir reads an environment variable at call time, so pointing it at
+    the directory the wizard just wrote into is enough to exercise the real
+    lookup path rather than bypassing it.
+    """
+    import os
+
+    previous = os.environ.get("ALGAESENSE_DATA_DIR")
+    os.environ["ALGAESENSE_DATA_DIR"] = str(monkeypatched_data_dir)
+    try:
+        recovered = monitoring._calibrated_voc_ppm(rows, run_id)
+    finally:
+        if previous is None:
+            os.environ.pop("ALGAESENSE_DATA_DIR", None)
+        else:
+            os.environ["ALGAESENSE_DATA_DIR"] = previous
+
+    assert recovered is not None, "the saved calibration should be found and applied"
+    assert recovered[0] == pytest.approx(true_ppm, abs=1.5)
+
+    """
+    The placeholder would have reported this same voltage as roughly
+    0.5 ppm -- two orders of magnitude out. Asserting they differ is what
+    proves the real calibration is genuinely being used.
+    """
+    assert abs(recovered[0] - monitoring._voc_ppm_placeholder(voltage)) > 100.0
+
+
+def test_an_unusable_voc_calibration_falls_back_instead_of_crashing() -> None:
+    """A mistyped run id should degrade to the labelled placeholder, not
+    take down the live view mid-experiment."""
+    from algaesense_agent.dashboard import streamlit_app as monitoring
+
+    rows = [{"sensor_id": "PID01", "pid_voltage_mv": 100.0}]
+
+    assert monitoring._calibrated_voc_ppm(rows, "no_such_calibration_run") is None
+
+
 def test_restarting_clears_the_previous_calibration_from_the_page(tmp_path: Path) -> None:
     """Calibrating a second sensor must not inherit the first one's readings
     -- that would silently attribute one sensor's response to another."""
