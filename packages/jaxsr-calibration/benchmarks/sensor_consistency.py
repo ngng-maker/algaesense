@@ -101,6 +101,16 @@ class SensorTrace:
     corrected_ppm: list[float]
     raw_rmse_vs_true: float
     corrected_rmse_vs_true: float
+    raw_median_abs_err: float = 0.0
+    corrected_median_abs_err: float = 0.0
+    """
+    Median absolute error is carried alongside RMSE because once sparse
+    spikes are present the two answer different questions: RMSE is
+    dominated by the handful of contaminated samples, while the median
+    describes the bulk of the trace an operator actually reads. Reporting
+    only one would misrepresent the result in whichever direction that one
+    happened to favour.
+    """
 
 
 @dataclass
@@ -231,6 +241,8 @@ def run_consistency_case(
                 corrected_ppm=[float(v) for v in corrected_arr],
                 raw_rmse_vs_true=float(np.sqrt(np.mean((raw_arr - true_ppm) ** 2))),
                 corrected_rmse_vs_true=float(np.sqrt(np.mean((corrected_arr - true_ppm) ** 2))),
+                raw_median_abs_err=float(np.median(np.abs(raw_arr - true_ppm))),
+                corrected_median_abs_err=float(np.median(np.abs(corrected_arr - true_ppm))),
             )
 
         """
@@ -257,8 +269,9 @@ def run_consistency_case(
         print(f"  [{case}] cross-sensor spread: raw={raw_spread:.2f} ppm -> corrected={corrected_spread:.2f} ppm")
         for sensor_id, trace in result.traces.items():
             print(
-                f"    {sensor_id} ({trace.environment}): RMSE vs true "
-                f"raw={trace.raw_rmse_vs_true:.2f} -> corrected={trace.corrected_rmse_vs_true:.2f} ppm"
+                f"    {sensor_id} ({trace.environment}): "
+                f"RMSE {trace.raw_rmse_vs_true:6.2f} -> {trace.corrected_rmse_vs_true:6.2f} ppm | "
+                f"median|err| {trace.raw_median_abs_err:6.2f} -> {trace.corrected_median_abs_err:5.2f} ppm"
             )
 
     return result

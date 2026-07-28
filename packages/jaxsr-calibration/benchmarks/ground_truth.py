@@ -262,7 +262,7 @@ class NoiseConfig:
     """
     ambient: AmbientCovariateTruth = field(default_factory=AmbientCovariateTruth)
     ar1_phi: float = 0.8
-    ar1_sigma_mv: float = 0.4
+    ar1_sigma_mv: float = 2.6
     ambient_rh_swing_pct: float = 20.0
     ambient_t_swing_c: float = 4.0
 
@@ -430,15 +430,35 @@ asserted.
 
 AMBIENT_PROFILE_KINDS = ("stable", "warming", "diurnal")
 
+"""
+Each micro-environment gets its own MEAN RH/T, not just its own shape.
+That is what separates the three raw traces into visibly different bands
+the way real multi-sensor recordings look -- a sensor sitting in a warmer
+corner reads systematically higher, and its own nominal calibration
+cannot remove that because the offset is ambient, not intrinsic to the
+sensor. Covariate correction can, because each sensor logs the RH/T that
+explains it.
+"""
+AMBIENT_MEANS = {
+    "stable": {"t_offset_c": 0.0, "rh_offset_pct": 0.0},
+    "warming": {"t_offset_c": 3.5, "rh_offset_pct": 6.0},
+    "diurnal": {"t_offset_c": -2.5, "rh_offset_pct": -8.0},
+}
+
 
 def ambient_micro_environment(kind: str, t_s: np.ndarray, noise: NoiseConfig, rng):
     """Return (sample_rh_pct, sample_t_c) for one sensor's own housing,
     as a real instrument would log them alongside its voltage."""
     t_h = t_s / 3600.0
+    offsets = AMBIENT_MEANS[kind]
+    rh_mid = noise.ambient.rh_ref_pct + offsets["rh_offset_pct"]
+    t_mid = noise.ambient.t_ref_c + offsets["t_offset_c"]
 
     if kind == "stable":
-        rh = np.full(t_s.shape, noise.ambient.rh_ref_pct) + rng.normal(0.0, 0.3, size=t_s.shape)
-        temp = np.full(t_s.shape, noise.ambient.t_ref_c) + rng.normal(0.0, 0.1, size=t_s.shape)
+        """Quiet corner: essentially flat, but still real instrument
+        noise on the RH/T channels themselves."""
+        rh = np.full(t_s.shape, rh_mid) + rng.normal(0.0, 0.6, size=t_s.shape)
+        temp = np.full(t_s.shape, t_mid) + rng.normal(0.0, 0.25, size=t_s.shape)
         return rh, temp
 
     if kind == "warming":
@@ -448,18 +468,73 @@ def ambient_micro_environment(kind: str, t_s: np.ndarray, noise: NoiseConfig, rn
         drift against a noisy room actually looks like.
         """
         span_h = max(t_h[-1], 1.0)
-        wander = _ar1_noise(t_s.size, 0.995, 0.05, rng)
-        temp = noise.ambient.t_ref_c - 2.0 + 7.0 * (t_h / span_h) + wander
-        rh = noise.ambient.rh_ref_pct - 5.0 + 10.0 * (t_h / span_h) + 0.5 * wander
+        wander = _ar1_noise(t_s.size, 0.995, 0.09, rng)
+        temp = t_mid - 2.0 + 7.0 * (t_h / span_h) + wander
+        rh = rh_mid - 5.0 + 10.0 * (t_h / span_h) + 0.5 * wander
         return rh, temp
 
     if kind == "diurnal":
         phase = 2.0 * np.pi * t_h / 24.0
-        temp = noise.ambient.t_ref_c + noise.ambient_t_swing_c * np.sin(phase)
-        rh = noise.ambient.rh_ref_pct + noise.ambient_rh_swing_pct * np.sin(phase - 0.6)
+        temp = t_mid + noise.ambient_t_swing_c * np.sin(phase) + rng.normal(0.0, 0.2, size=t_s.shape)
+        rh = rh_mid + noise.ambient_rh_swing_pct * np.sin(phase - 0.6) + rng.normal(0.0, 0.5, size=t_s.shape)
         return rh, temp
 
     raise ValueError(f"unknown ambient micro-environment kind: {kind!r}")
+
+
+EVENT_RATE_PER_DAY = 1.5
+"""Genuine transient VOC events -- a disturbance, a feed, a door opening.
+These are REAL SIGNAL: every sensor watching the reactor sees the same
+event at the same instant, and a correction pipeline that removed them
+would be destroying data, not cleaning it."""
+
+GLITCH_RATE_PER_DAY = 1.5
+"""Instrument glitches -- electrical transients, dropouts, connector
+noise. These are per-sensor and independent: no other sensor sees them.
+
+That difference is the whole point of running three sensors. From ONE
+trace a real event and a glitch are frequently indistinguishable; across
+three simultaneous traces they are not, because coincidence across
+independent instruments is the signature of something real. The benchmark
+models them separately so the distinction can actually be measured
+instead of assumed."""
+
+
+def spike_train(t_s: np.ndarray, rng, rate_per_day: float, lo: float, hi: float) -> np.ndarray:
+    """Sparse, sharp, short-lived excursions.
+
+    Used for BOTH real VOC events (in ppm, shared across sensors, part of
+    the true signal) and instrument glitches (in mV, independent per
+    sensor, pure contamination) -- the shape is the same, which is exactly
+    why a single trace cannot tell them apart.
+    """
+    duration_days = float(t_s[-1] - t_s[0]) / 86400.0
+    n_spikes = rng.poisson(max(rate_per_day * duration_days, 0.0))
+    out = np.zeros_like(t_s, dtype=float)
+    if n_spikes == 0:
+        return out
+
+    dt_s = float(np.median(np.diff(t_s))) if t_s.size > 1 else 1.0
+    for _ in range(int(n_spikes)):
+        centre = int(rng.integers(0, t_s.size))
+        """SHARP: one to three samples. Real PID excursions are brief
+        vertical strokes, not hour-long plateaus -- an earlier version of
+        this used widths up to an hour, which contaminated ~10% of the
+        run and swamped every other effect in the benchmark."""
+        width = int(rng.integers(0, 2))
+        amplitude = rng.choice([-1.0, 1.0]) * rng.uniform(lo, hi)
+
+        """
+        `start`/`stop`, NOT lo/hi: those are this function's amplitude-bound
+        parameters, and reassigning them here silently turned every
+        subsequent rng.uniform(lo, hi) into a draw from the ARRAY INDEX
+        range -- producing ~2000 ppm excursions and driving the true signal
+        to -1380 ppm, which still looked superficially like 'spiky data'.
+        """
+        start = max(centre - width, 0)
+        stop = min(centre + width + 1, t_s.size)
+        out[start:stop] += amplitude
+    return out
 
 
 def uncorrectable_drift_mv(kind: str, t_s: np.ndarray, rng) -> np.ndarray:
@@ -491,6 +566,8 @@ def generate_week_long_sensor_recording(
     duration_s: int = 7 * 24 * 3600,
     dt_s: float = 300.0,
     inject_uncorrectable_drift: bool = False,
+    inject_events: bool = True,
+    inject_glitches: bool = True,
     seed: int = 0,
 ) -> pl.DataFrame:
     """One week-long run at a fixed (PAR, temp), watched simultaneously by
@@ -511,7 +588,17 @@ def generate_week_long_sensor_recording(
     t_arr = np.arange(n) * dt_s
     timestamps = [base_time + dt.timedelta(seconds=float(ti)) for ti in t_arr]
 
+    """
+    Real VOC events are generated ONCE, outside the per-sensor loop, and
+    folded into `true_ppm` -- so they are part of the ground truth every
+    sensor is trying to measure, identical and simultaneous across all
+    three. A pipeline that removed them would be destroying signal, and
+    scoring them as error would be measuring the wrong thing.
+    """
     true_ppm = true_voc_timeseries(t_arr, par, temp)
+    if inject_events:
+        event_rng = np.random.default_rng(seed + 7919)
+        true_ppm = true_ppm + spike_train(t_arr, event_rng, EVENT_RATE_PER_DAY, 60.0, 240.0)
 
     frames = []
     for sensor_id in sensor_ids:
@@ -524,6 +611,14 @@ def generate_week_long_sensor_recording(
         ar1 = _ar1_noise(n, noise.ar1_phi, noise.ar1_sigma_mv, sensor_rng)
 
         voltage = truth.b0_mv + truth.b1_mv_per_ppm * true_ppm + ambient_effect + ar1
+
+        """
+        Glitches are drawn per sensor from that sensor's OWN rng, so no
+        two sensors share one. This is what makes cross-sensor coincidence
+        a usable discriminator downstream.
+        """
+        if inject_glitches:
+            voltage = voltage + spike_train(t_arr, sensor_rng, GLITCH_RATE_PER_DAY, 40.0, 160.0)
         if inject_uncorrectable_drift:
             voltage = voltage + uncorrectable_drift_mv(kind, t_arr, sensor_rng)
 
