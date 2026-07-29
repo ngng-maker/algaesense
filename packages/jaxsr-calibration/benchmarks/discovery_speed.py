@@ -150,12 +150,28 @@ METHOD_NAMES = [
     "Sobol",
     "Grid",
     "Random",
-    "Ours (plain)",
-    "Ours + labwiki-constraint",
-    "Ours + labwiki-search_bounds",
+    "Ours (UCB)",
+    "Ours (UCB) + labwiki",
+    "Ours (D-optimal) + labwiki",
+    "Ours (model-discrimination) + labwiki",
 ]
 
-ADAPTIVE_METHODS = {"Ours (plain)", "Ours + labwiki-constraint", "Ours + labwiki-search_bounds"}
+ACQUISITION_BY_METHOD = {
+    "Ours (UCB)": "ucb",
+    "Ours (UCB) + labwiki": "ucb",
+    "Ours (D-optimal) + labwiki": "d_optimal",
+    "Ours (model-discrimination) + labwiki": "model_discrimination",
+}
+"""What each variant is picking its next experiment FOR.
+
+UCB hunts good operating conditions; the other two hunt the equation.
+Every 'ours' variant except the first also gets labwiki's declared search
+bounds, so the acquisition function is the only thing separating the last
+three -- otherwise the comparison would confound 'which goal' with
+'was it allowed to leave the seed box'.
+"""
+
+ADAPTIVE_METHODS = set(ACQUISITION_BY_METHOD)
 
 LABWIKI_NOTE_ROUND = 2
 LABWIKI_NOTE_TEXT = (
@@ -242,21 +258,18 @@ def _adaptive_sequence(method: str, seed: int, rng: np.random.Generator) -> np.n
             constant rather than simulated."""
             return measure(par, temp, rng), 12.0
 
+        with_labwiki = method != "Ours (UCB)"
         points = run_active_learning_campaign(
             measure_fn,
             n_extra=MAX_EXPERIMENTS - len(SEED_POINTS),
             data_dir=data_dir,
-            campaign_id=f"disc_{method.replace(' ', '_')}_{seed}",
-            use_labwiki=method != "Ours (plain)",
+            campaign_id=f"disc_{abs(hash(method)) % 9999}_{seed}",
+            use_labwiki=with_labwiki,
             wiki_root=wiki_root,
-            labwiki_note_round=LABWIKI_NOTE_ROUND if method != "Ours (plain)" else None,
+            labwiki_note_round=LABWIKI_NOTE_ROUND if with_labwiki else None,
             labwiki_note_text=LABWIKI_NOTE_TEXT,
-            bound_override_after_note=(
-                LABWIKI_BOUND_OVERRIDE if method == "Ours + labwiki-constraint" else None
-            ),
-            search_bounds=(
-                DECLARED_SEARCH_BOUNDS if method == "Ours + labwiki-search_bounds" else None
-            ),
+            search_bounds=DECLARED_SEARCH_BOUNDS if with_labwiki else None,
+            acquisition=ACQUISITION_BY_METHOD[method],
         )
     return np.array(points, dtype=float)
 
@@ -388,9 +401,9 @@ def _report(results: dict[str, list[MethodResult]], seeds: int) -> None:
         )
 
 
-PALETTE = ["#1f77b4", "#2ca02c", "#d62728", "#ff7f0e", "#9467bd", "#17becf", "#8c564b"]
-LINESTYLES = ["-", "--", "-.", ":", (0, (3, 1, 1, 1)), (0, (5, 2)), (0, (1, 1))]
-MARKERS = ["o", "s", "^", "D", "v", "P", "X"]
+PALETTE = ["#1f77b4", "#2ca02c", "#d62728", "#ff7f0e", "#9467bd", "#17becf", "#8c564b", "#e377c2"]
+LINESTYLES = ["-", "--", "-.", ":", (0, (3, 1, 1, 1)), (0, (5, 2)), (0, (1, 1)), (0, (4, 1, 1, 1, 1, 1))]
+MARKERS = ["o", "s", "^", "D", "v", "P", "X", "*"]
 STYLE = {
     m: {"color": PALETTE[i], "linestyle": LINESTYLES[i], "marker": MARKERS[i]}
     for i, m in enumerate(METHOD_NAMES)

@@ -255,6 +255,7 @@ def suggest_next_experiments(
     feature_columns: list[str] | None = None,
     n_points: int = 3,
     kappa: float = 2.0,
+    acquisition: str = "ucb",
     max_terms: int = 5,
     search_bounds: dict[str, tuple[float, float]] | None = None,
     bound_overrides: dict[str, tuple[float, float]] | None = None,
@@ -315,7 +316,7 @@ def suggest_next_experiments(
     learner = jaxsr.ActiveLearner(
         model=model,
         bounds=resolved_search_bounds,
-        acquisition=jaxsr.UCB(kappa=kappa),
+        acquisition=build_acquisition(acquisition, kappa),
     )
     result = learner.suggest(n_points=n_points)
 
@@ -338,6 +339,52 @@ def suggest_next_experiments(
         acquisition=result.acquisition,
         fit=fit,
         search_bounds=resolved_search_bounds,
+    )
+
+
+ACQUISITIONS = ("ucb", "d_optimal", "a_optimal", "model_discrimination", "prediction_variance")
+
+
+def build_acquisition(name: str, kappa: float):
+    """Choose what the next experiment is being picked FOR.
+
+    This is not a tuning knob, it is a choice of goal, and the two goals
+    pull in opposite directions.
+
+    `ucb` hunts good operating conditions: it scores a candidate by its
+    predicted output plus `kappa` times the model's uncertainty there, so
+    it concentrates near wherever the response already looks strong.
+    Deliberately re-sampling a region known to be poor is wasted budget
+    when the question is "what settings should I run".
+
+    The rest hunt the EQUATION, and will happily spend a run somewhere
+    dull if that is where the model is least pinned down. `d_optimal`
+    picks the point that most sharpens the fitted coefficients as a whole,
+    `a_optimal` the one that most reduces their average uncertainty, and
+    `model_discrimination` the one where competing candidate equations
+    disagree most -- which is close to a literal statement of "which of
+    these forms is right". `prediction_variance` is the simple version:
+    go wherever the model is least sure.
+
+    Measured, not asserted: with `ucb` this project's active learning
+    never discovered the true VOC(light, temperature) equation in 50
+    experiments across 8 repeats, while plain space-filling designs did in
+    17-22 -- because the saturating light term's curvature lives at LOW
+    light, which produces low VOC and which an optimiser has no reason to
+    visit. See the discovery-speed benchmark.
+    """
+    if name == "ucb":
+        return jaxsr.UCB(kappa=kappa)
+    if name == "d_optimal":
+        return jaxsr.acquisition.DOptimal()
+    if name == "a_optimal":
+        return jaxsr.acquisition.AOptimal()
+    if name == "model_discrimination":
+        return jaxsr.acquisition.ModelDiscrimination()
+    if name == "prediction_variance":
+        return jaxsr.acquisition.PredictionVariance()
+    raise ValueError(
+        f"Unknown acquisition {name!r}; choose one of {sorted(ACQUISITIONS)}."
     )
 
 
@@ -384,6 +431,7 @@ def suggest_next_experiments_with_context(
     feature_columns: list[str] | None = None,
     n_points: int = 3,
     kappa: float = 2.0,
+    acquisition: str = "ucb",
     max_terms: int = 5,
     extra_topics: list[str] | None = None,
     search_bounds: dict[str, tuple[float, float]] | None = None,
@@ -421,6 +469,7 @@ def suggest_next_experiments_with_context(
         feature_columns=feature_columns,
         n_points=n_points,
         kappa=kappa,
+        acquisition=acquisition,
         max_terms=max_terms,
         search_bounds=search_bounds,
         bound_overrides=bound_overrides,
