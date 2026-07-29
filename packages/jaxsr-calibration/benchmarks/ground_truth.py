@@ -1006,6 +1006,68 @@ question about the shape of a smooth curve rather than about finding a
 kink.
 """
 
+"""
+WHERE THESE FORMS COME FROM, AND WHICH PARTS ARE ACTUALLY BACKED
+================================================================
+
+Worth stating precisely, because a synthetic ground truth is easy to
+mistake for a validated model of the organism. It is not one. What
+follows separates the terms whose functional FORM is standard from the
+ones that are reasonable choices, and both from the coefficient values,
+which are not literature values at all.
+
+Well-founded in the literature (the form, not the numbers):
+
+  Light with photoinhibition -- Haldane / substrate-inhibition kinetics.
+    Platt, T., Gallegos, C.L. & Harrison, W.G. (1980). "Photoinhibition
+    of photosynthesis in natural assemblages of marine phytoplankton."
+    Journal of Marine Research 38(4), 687-701.
+    Andrews, J.F. (1968). "A mathematical model for the continuous
+    culture of microorganisms utilizing inhibitory substrates."
+    Biotechnology and Bioengineering 10(6), 707-723.
+
+  Nitrate uptake -- Monod saturation.
+    Monod, J. (1949). "The growth of bacterial cultures."
+    Annual Review of Microbiology 3, 371-394.
+
+Qualitatively right for this organism, but the functional form is a local
+approximation rather than a cited model:
+
+  pH optimum. Arthrospira/Spirulina is cultured alkaline, conventionally
+  around pH 9-11, which is the band the Zarrouk medium establishes
+  (Zarrouk, C., 1966, doctoral thesis, University of Paris). A quadratic
+  penalty about an optimum is a convenient local shape, not a published
+  one.
+
+Weakest, and flagged deliberately:
+
+  Temperature enters linearly. Real growth rises Arrhenius-like and then
+  falls off sharply past a thermal optimum; this function has no decline
+  at all, so it is only defensible across a narrow band.
+
+  The light x temperature interaction is physically plausible -- light
+  saturation does shift with temperature -- but its magnitude was chosen
+  to be detectable by this benchmark, not taken from a measurement.
+
+Not from any source:
+
+  Every coefficient value. They were selected so the terms are
+  distinguishable at realistic noise, and the light geometry was retuned
+  twice specifically to make the Haldane-versus-Monod discrimination
+  winnable rather than impossible. That is legitimate for a benchmark,
+  whose purpose is a KNOWN truth of realistic shape, but it means these
+  numbers must not be quoted as properties of Arthrospira.
+
+  The link to VOC at all. Every citation above concerns growth or
+  photosynthesis. Treating VOC emission as following the same functional
+  shape is an assumption about metabolic coupling that this project has
+  not established for this organism. It is the part of the ground truth
+  with no support behind it, and the reason the honest description of
+  this function is "a synthetic response built from physically motivated
+  forms" rather than "a model of Arthrospira VOC emission".
+"""
+
+
 HALDANE_PEAK_PAR = 300.0
 HALDANE_K_I = HALDANE_PEAK_PAR**2 / K_M
 """Haldane peaks at sqrt(K_M * K_I). Placed at 300 against a light range
