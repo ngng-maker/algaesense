@@ -924,3 +924,52 @@ def generate_dynamic_experiment_recording(
             "reactor_temp_c": np.full(n, temp),
         }
     )
+
+
+# ---------------------------------------------------------------- four factors
+
+"""
+The two-factor truth above is what Tests 1-3 and the original discovery
+benchmark are built on, and it stays exactly as it is. What follows is an
+ADDITIONAL, wider ground truth for the question those cannot answer:
+whether adaptive experiment design earns its keep once the space is big
+enough that covering it evenly stops being cheap.
+
+Two more factors, both chosen because they are real levers on a
+photobioreactor and because their shapes differ from the light and
+temperature terms already present -- a benchmark whose new factors behave
+like the old ones would not test anything new.
+"""
+
+PH_OPT = 9.2
+"""Spirulina is cultured alkaline; output falls away either side."""
+PH_K = 1.8
+PH_BOUNDS = (7.5, 10.5)
+
+NUTRIENT_VMAX = 14.0
+NUTRIENT_K_M = 4.0
+"""Nitrate follows Monod saturation, the same family as the light
+response -- deliberately, since two saturating terms in different
+variables is exactly the sort of confusion a discovery method should have
+to resolve."""
+NUTRIENT_BOUNDS = (0.5, 30.0)
+
+
+def true_voc_ppm_4d(par, temp, ph, nutrient):
+    """VOC output as a function of light, temperature, pH and nitrate.
+
+    The two-factor truth, plus a pH optimum and a saturating nutrient
+    response:
+
+        + the whole of true_voc_ppm(par, temp)
+        - PH_K * (ph - PH_OPT)^2                       [pH optimum]
+        + NUTRIENT_VMAX * nut / (NUTRIENT_K_M + nut)   [nitrate saturation]
+    """
+    par = np.asarray(par, dtype=float)
+    temp = np.asarray(temp, dtype=float)
+    ph = np.asarray(ph, dtype=float)
+    nutrient = np.asarray(nutrient, dtype=float)
+
+    ph_term = -PH_K * (ph - PH_OPT) ** 2
+    nutrient_term = NUTRIENT_VMAX * nutrient / (NUTRIENT_K_M + nutrient)
+    return true_voc_ppm(par, temp) + ph_term + nutrient_term
