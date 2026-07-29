@@ -8,6 +8,7 @@ import datetime as dt
 from dataclasses import dataclass
 from pathlib import Path
 
+import jax.numpy as jnp
 import jaxsr
 import numpy as np
 import polars as pl
@@ -345,34 +346,46 @@ def suggest_next_experiments(
 ACQUISITIONS = ("ucb", "d_optimal", "a_optimal", "model_discrimination", "prediction_variance")
 
 
-def build_acquisition(name: str, kappa: float):
-    """Choose what the next experiment is being picked FOR.
+class NormalisedBlend(jaxsr.acquisition.AcquisitionFunction):
+    """A weighted mix of acquisition functions, each rescaled first.
 
-    This is not a tuning knob, it is a choice of goal, and the two goals
-    pull in opposite directions.
+    jaxsr's own `Composite` adds component scores raw, which is a trap for
+    anything mixing acquisition families: a D-optimal score comes from a
+    determinant and can be astronomically large or vanishingly small,
+    while a model-discrimination score is a prediction spread in ppm.
+    Written `0.5 * DOptimal() + 0.5 * ModelDiscrimination()`, whichever
+    component happens to have the bigger raw magnitude simply wins, and
+    the weights quietly mean nothing.
 
-    `ucb` hunts good operating conditions: it scores a candidate by its
-    predicted output plus `kappa` times the model's uncertainty there, so
-    it concentrates near wherever the response already looks strong.
-    Deliberately re-sampling a region known to be poor is wasted budget
-    when the question is "what settings should I run".
-
-    The rest hunt the EQUATION, and will happily spend a run somewhere
-    dull if that is where the model is least pinned down. `d_optimal`
-    picks the point that most sharpens the fitted coefficients as a whole,
-    `a_optimal` the one that most reduces their average uncertainty, and
-    `model_discrimination` the one where competing candidate equations
-    disagree most -- which is close to a literal statement of "which of
-    these forms is right". `prediction_variance` is the simple version:
-    go wherever the model is least sure.
-
-    Measured, not asserted: with `ucb` this project's active learning
-    never discovered the true VOC(light, temperature) equation in 50
-    experiments across 8 repeats, while plain space-filling designs did in
-    17-22 -- because the saturating light term's curvature lives at LOW
-    light, which produces low VOC and which an optimiser has no reason to
-    visit. See the discovery-speed benchmark.
+    Each component is min-max rescaled onto [0, 1] across the candidate
+    set before weighting, so a weight is a genuine share of influence.
+    Only the RANKING within each component survives that, which is all an
+    acquisition needs -- the candidates are scored to be sorted, not to be
+    interpreted as physical quantities.
     """
+
+    def __init__(self, weighted: list[tuple[float, jaxsr.acquisition.AcquisitionFunction]]):
+        self.weighted = weighted
+
+    @property
+    def name(self) -> str:
+        return " + ".join(f"{w:.2g}*{f.name}" for w, f in self.weighted)
+
+    def score(self, X_candidates, model):
+        total = None
+        for weight, function in self.weighted:
+            raw = jnp.asarray(function.score(X_candidates, model), dtype=float)
+            lo, hi = jnp.min(raw), jnp.max(raw)
+            span = hi - lo
+            """A component that scores every candidate identically carries
+            no information; contributing zeros lets the others decide
+            rather than letting a divide-by-zero poison the whole blend."""
+            scaled = jnp.where(span > 0, (raw - lo) / jnp.where(span > 0, span, 1.0), 0.0)
+            total = scaled * weight if total is None else total + scaled * weight
+        return total
+
+
+def _single_acquisition(name: str, kappa: float):
     if name == "ucb":
         return jaxsr.UCB(kappa=kappa)
     if name == "d_optimal":
@@ -383,9 +396,53 @@ def build_acquisition(name: str, kappa: float):
         return jaxsr.acquisition.ModelDiscrimination()
     if name == "prediction_variance":
         return jaxsr.acquisition.PredictionVariance()
-    raise ValueError(
-        f"Unknown acquisition {name!r}; choose one of {sorted(ACQUISITIONS)}."
-    )
+    raise ValueError(f"Unknown acquisition {name!r}; choose one of {sorted(ACQUISITIONS)}.")
+
+
+def build_acquisition(spec: str, kappa: float = 2.0):
+    """Choose what the next experiment is being picked FOR.
+
+    Not a tuning knob -- a choice of goal, and the goals pull in opposite
+    directions.
+
+    `ucb` hunts good operating conditions: predicted output plus `kappa`
+    times uncertainty, so it concentrates wherever the response already
+    looks strong. Re-sampling a region known to be poor is wasted budget
+    when the question is "what settings should I run".
+
+    The rest hunt the EQUATION, and will spend a run somewhere dull if
+    that is where the model is least pinned down. `d_optimal` picks the
+    point that most sharpens the fitted coefficients, `a_optimal` the one
+    that most reduces their average uncertainty, and
+    `model_discrimination` the one where competing candidate equations
+    disagree most -- close to a literal statement of "which of these forms
+    is right". `prediction_variance` is the blunt version: go wherever the
+    model is least sure.
+
+    Measured, not asserted: against a known true equation, `d_optimal`
+    recovered it in 16 experiments and `model_discrimination` in 17, while
+    `ucb` never did in 50 across 8 repeats -- the light response's
+    curvature lives at LOW light, which yields little VOC and which an
+    optimiser has no reason to visit.
+
+    A blend is written as a sum, optionally weighted:
+    `"d_optimal+model_discrimination"` or
+    `"0.7*d_optimal+0.3*model_discrimination"`. Components are rescaled
+    before mixing -- see NormalisedBlend for why that is not optional.
+    """
+    parts = [p.strip() for p in spec.split("+") if p.strip()]
+    if len(parts) == 1 and "*" not in parts[0]:
+        return _single_acquisition(parts[0], kappa)
+
+    weighted = []
+    for part in parts:
+        if "*" in part:
+            weight_text, name = part.split("*", 1)
+            weight = float(weight_text.strip())
+        else:
+            weight, name = 1.0, part
+        weighted.append((weight, _single_acquisition(name.strip(), kappa)))
+    return NormalisedBlend(weighted)
 
 
 @dataclass

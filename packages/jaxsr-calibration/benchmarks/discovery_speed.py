@@ -70,7 +70,7 @@ MEASUREMENT_NOISE_PPM = 1.2
 actually delivers, so this test operates on data of exactly the quality
 that pipeline is measured to produce."""
 
-MAX_EXPERIMENTS = 50
+MAX_EXPERIMENTS = 45
 """Not a budget -- a stop so a non-converging method terminates. Methods
 that reach it are reported as not converged."""
 
@@ -145,33 +145,41 @@ def build_basis_library() -> jaxsr.BasisLibrary:
     )
 
 
-METHOD_NAMES = [
-    "Latin Hypercube",
-    "Sobol",
-    "Grid",
-    "Random",
-    "Ours (UCB)",
-    "Ours (UCB) + labwiki",
-    "Ours (D-optimal) + labwiki",
-    "Ours (model-discrimination) + labwiki",
-]
+STAGE_SWITCH_ROUND = 8
+"""When a staged policy stops asking "which form is right" and starts
+asking "how sharp are its coefficients". Early on several forms still fit
+the handful of points equally well, so discriminating between them is the
+binding uncertainty; once one has emerged, sharpening it is."""
+
+
+def _staged(round_num: int) -> str:
+    return "model_discrimination" if round_num < STAGE_SWITCH_ROUND else "d_optimal"
+
 
 ACQUISITION_BY_METHOD = {
-    "Ours (UCB)": "ucb",
-    "Ours (UCB) + labwiki": "ucb",
-    "Ours (D-optimal) + labwiki": "d_optimal",
-    "Ours (model-discrimination) + labwiki": "model_discrimination",
+    "UCB": "ucb",
+    "D-optimal": "d_optimal",
+    "Model-discrimination": "model_discrimination",
+    "Blend (D-opt + discrim)": "0.5*d_optimal+0.5*model_discrimination",
+    "Staged (discrim then D-opt)": _staged,
 }
-"""What each variant is picking its next experiment FOR.
+"""Every 'ours' variant is run twice, with and without labwiki, so the
+acquisition and the knowledge base can be told apart. The blend is
+normalised before weighting -- raw D-optimal and discrimination scores
+differ by orders of magnitude, so an unnormalised 50/50 would silently be
+whichever component happens to be larger."""
 
-UCB hunts good operating conditions; the other two hunt the equation.
-Every 'ours' variant except the first also gets labwiki's declared search
-bounds, so the acquisition function is the only thing separating the last
-three -- otherwise the comparison would confound 'which goal' with
-'was it allowed to leave the seed box'.
-"""
+CLASSICAL_METHODS = ["Latin Hypercube", "Sobol", "Grid", "Random"]
 
-ADAPTIVE_METHODS = set(ACQUISITION_BY_METHOD)
+ADAPTIVE_METHODS = {
+    f"{name}{suffix}"
+    for name in ACQUISITION_BY_METHOD
+    for suffix in ("", " + labwiki")
+}
+
+METHOD_NAMES = CLASSICAL_METHODS + [
+    f"{name}{suffix}" for name in ACQUISITION_BY_METHOD for suffix in ("", " + labwiki")
+]
 
 LABWIKI_NOTE_ROUND = 2
 LABWIKI_NOTE_TEXT = (
@@ -258,7 +266,8 @@ def _adaptive_sequence(method: str, seed: int, rng: np.random.Generator) -> np.n
             constant rather than simulated."""
             return measure(par, temp, rng), 12.0
 
-        with_labwiki = method != "Ours (UCB)"
+        with_labwiki = method.endswith(" + labwiki")
+        base = method[: -len(" + labwiki")] if with_labwiki else method
         points = run_active_learning_campaign(
             measure_fn,
             n_extra=MAX_EXPERIMENTS - len(SEED_POINTS),
@@ -269,7 +278,7 @@ def _adaptive_sequence(method: str, seed: int, rng: np.random.Generator) -> np.n
             labwiki_note_round=LABWIKI_NOTE_ROUND if with_labwiki else None,
             labwiki_note_text=LABWIKI_NOTE_TEXT,
             search_bounds=DECLARED_SEARCH_BOUNDS if with_labwiki else None,
-            acquisition=ACQUISITION_BY_METHOD[method],
+            acquisition=ACQUISITION_BY_METHOD[base],
         )
     return np.array(points, dtype=float)
 
@@ -401,13 +410,31 @@ def _report(results: dict[str, list[MethodResult]], seeds: int) -> None:
         )
 
 
-PALETTE = ["#1f77b4", "#2ca02c", "#d62728", "#ff7f0e", "#9467bd", "#17becf", "#8c564b", "#e377c2"]
-LINESTYLES = ["-", "--", "-.", ":", (0, (3, 1, 1, 1)), (0, (5, 2)), (0, (1, 1)), (0, (4, 1, 1, 1, 1, 1))]
-MARKERS = ["o", "s", "^", "D", "v", "P", "X", "*"]
-STYLE = {
-    m: {"color": PALETTE[i], "linestyle": LINESTYLES[i], "marker": MARKERS[i]}
-    for i, m in enumerate(METHOD_NAMES)
-}
+CLASSICAL_COLOURS = ["#1f77b4", "#2ca02c", "#d62728", "#ff7f0e"]
+ACQUISITION_COLOURS = ["#9467bd", "#17becf", "#8c564b", "#e377c2", "#7f7f7f"]
+CLASSICAL_MARKERS = ["o", "s", "^", "D"]
+ACQUISITION_MARKERS = ["v", "P", "X", "*", "h"]
+
+"""
+Colour carries the METHOD and line style carries whether labwiki was
+used -- solid with, dotted without. Built programmatically rather than as
+a hand-written list, because the last hand-written one silently ran two
+entries short of the method list and only failed once the list grew.
+"""
+STYLE = {}
+for index, name in enumerate(CLASSICAL_METHODS):
+    STYLE[name] = {
+        "color": CLASSICAL_COLOURS[index],
+        "linestyle": "-",
+        "marker": CLASSICAL_MARKERS[index],
+    }
+for index, name in enumerate(ACQUISITION_BY_METHOD):
+    for suffix, style in ((" + labwiki", "-"), ("", ":")):
+        STYLE[f"{name}{suffix}"] = {
+            "color": ACQUISITION_COLOURS[index],
+            "linestyle": style,
+            "marker": ACQUISITION_MARKERS[index],
+        }
 
 
 def _apply_style() -> None:

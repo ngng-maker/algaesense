@@ -174,7 +174,7 @@ def run_active_learning_campaign(
     labwiki_note_text: str | None = None,
     bound_override_after_note: dict[str, tuple[float, float]] | None = None,
     search_bounds: dict[str, tuple[float, float]] | None = None,
-    acquisition: str = "ucb",
+    acquisition: str | Callable[[int], str] = "ucb",
 ) -> list[tuple[float, float]]:
     """'Ours': the real suggest_next_experiments/_with_context tools
     pick one new point per round, informed by every experiment run so
@@ -214,6 +214,12 @@ def run_active_learning_campaign(
                 note_ingested = True
             bound_overrides = bound_override_after_note
 
+        """A staged policy hands in a callable so the goal can change
+        partway through a campaign -- discriminate between candidate
+        forms while several still fit, then sharpen the winner's
+        coefficients once one has emerged."""
+        round_acquisition = acquisition(round_num) if callable(acquisition) else acquisition
+
         if use_labwiki:
             result = suggest_next_experiments_with_context(
                 campaign_id,
@@ -223,7 +229,7 @@ def run_active_learning_campaign(
                 feature_columns=["par_umol_m2_s", "mean_sample_t_c"],
                 n_points=1,
                 kappa=2.0,
-                acquisition=acquisition,
+                acquisition=round_acquisition,
                 max_terms=5,
                 bound_overrides=bound_overrides,
                 search_bounds=search_bounds,
@@ -236,7 +242,7 @@ def run_active_learning_campaign(
                 feature_columns=["par_umol_m2_s", "mean_sample_t_c"],
                 n_points=1,
                 kappa=2.0,
-                acquisition=acquisition,
+                acquisition=round_acquisition,
                 max_terms=5,
                 search_bounds=search_bounds,
             )
