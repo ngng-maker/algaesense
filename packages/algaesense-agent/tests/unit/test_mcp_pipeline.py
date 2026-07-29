@@ -652,6 +652,71 @@ def test_discover_led_response_dynamics_applies_a_persisted_ambient_baseline_cor
     assert "reactor_par_umol_m2_s" in result.selected_features["ppm_asgas"]
 
 
+def test_ambient_correction_does_not_subtract_the_baseline_twice(tmp_path: Path) -> None:
+    """Regression guard for a bug that shipped and was invisible to every
+    existing assertion.
+
+    Two functions each remove the sensor's baseline: the zero-centred
+    ambient correction subtracts the whole predicted reading including its
+    intercept, and `apply_calibration` subtracts `b0`. Composing them
+    reads low by exactly `b0 / b1`, with no error raised anywhere.
+
+    The test that previously covered this path used a covariate model with
+    `alpha=0.0` -- the single value for which the two variants agree --
+    and only asserted that a feature had been selected, which a constant
+    offset cannot disturb. So a non-zero intercept, and an assertion on
+    the concentrations themselves, are both load-bearing here.
+    """
+    from jaxsr_calibration.processing.covariate import CovariateModel, persist_covariate_models
+
+    _write_dynamics_experiment(tmp_path, "exp_bias_check")
+    _persist_known_calibration(tmp_path, "cal_bias_check")
+
+    intercept_mv = 40.0
+    persist_covariate_models(
+        {
+            "PID01": CovariateModel(
+                sensor_id="PID01",
+                method="ols",
+                alpha=intercept_mv,
+                beta_rh=0.0,
+                gamma_t=0.0,
+                delta_rh_t=0.0,
+                covariance=None,
+                symbolic_regressor=None,
+                training_window=(_DYN_START, _DYN_START + dt.timedelta(hours=1)),
+                r_squared=0.9,
+            )
+        },
+        "ambient_bias_check",
+        tmp_path / "derived" / "diagnostics" / "ambient_baseline",
+    )
+
+    corrected = discover_led_response_dynamics(
+        "exp_bias_check",
+        "R01",
+        "PID01",
+        "cal_bias_check",
+        data_dir=tmp_path,
+        max_terms=3,
+        ambient_baseline_run_id="ambient_bias_check",
+    )
+    plain = discover_led_response_dynamics(
+        "exp_bias_check", "R01", "PID01", "cal_bias_check", data_dir=tmp_path, max_terms=3
+    )
+
+    """
+    With flat RH/T coefficients there is no drift to remove, so the
+    ambient-corrected concentrations must match the uncorrected ones. The
+    buggy composition instead shifted every value down by
+    intercept / b1 -- a bias this asserts is absent.
+    """
+    bias_if_double_subtracted = intercept_mv / _CAL_B1_MV_PER_PPM
+    assert bias_if_double_subtracted > 0.5, "the guard needs a bias big enough to detect"
+
+    assert corrected.ppm_asgas_mean == pytest.approx(plain.ppm_asgas_mean, abs=0.01)
+
+
 def test_discover_led_response_dynamics_raises_clearly_for_an_unknown_ambient_baseline_run_id(tmp_path: Path) -> None:
     _write_dynamics_experiment(tmp_path, "exp_dynamics_test")
     _persist_known_calibration(tmp_path, "cal_dynamics_test")

@@ -12,8 +12,11 @@ import jaxsr
 import numpy as np
 import polars as pl
 
-from jaxsr_calibration.calibration.apply import apply_calibration
-from jaxsr_calibration.processing.covariate import apply_covariate_correction, load_covariate_models
+from jaxsr_calibration.calibration.apply import apply_calibration, load_calibration
+from jaxsr_calibration.processing.covariate import (
+    load_covariate_models,
+    normalise_to_reference_conditions,
+)
 from jaxsr_calibration.processing.features import load_features_for_jaxsr, load_timeseries_for_jaxsr
 
 from algaesense_agent.labwiki.wiki import query_labwiki
@@ -462,6 +465,20 @@ class DynamicsDiscoveryResult:
     coefficients: dict[str, list[float]]
     selected_features: dict[str, list[str]]
 
+    ppm_asgas_mean: float
+    ppm_asgas_min: float
+    ppm_asgas_max: float
+    """The calibrated concentrations this fit was actually run over.
+
+    Reported because a discovered *rate* law is invariant to a constant
+    offset in the concentrations feeding it -- so a systematic bias in
+    those concentrations leaves the equations looking entirely reasonable
+    while the absolute numbers are wrong. Exactly that happened here: an
+    ambient correction composed the wrong way shifted every value by
+    `b0 / b1`, and nothing in the returned equations or metrics could
+    show it. A caller can now sanity-check the level, not just the shape.
+    """
+
 
 """
 `jaxsr.discover_dynamics`'s own DynamicsResult holds a raw numpy array
@@ -598,29 +615,46 @@ def discover_led_response_dynamics(
         )
 
     """
-    Applying the persisted ambient-covariate correction (if given) BEFORE
-    calibration, not after -- the correction subtracts a predicted
-    RH/T-driven baseline from raw millivolts, which is the same space
-    `apply_calibration`'s own `b0`/`b1` inversion expects to operate in.
-    Confirmed real (see this function's docstring): a synthetic
-    benchmark with known ground truth showed this ordering meaningfully
-    and consistently improves dynamics recovery.
-    """
-    voltage = readings["pid_voltage_mv"]
-    if ambient_baseline_run_id is not None:
-        covariate_models = load_covariate_models(
-            ambient_baseline_run_id, data_dir / "derived" / "diagnostics" / "ambient_baseline"
-        )
-        corrected = apply_covariate_correction(readings, covariate_models)
-        voltage = corrected["pid_voltage_mv_covariate_corrected"]
-
-    """
     `apply_calibration`'s `data_dir` is the exact directory holding
     `{calibration_run_id}.parquet`/`.yaml`, not the top-level data_dir --
     matching the one convention already established for this
     (mcp_calibration/server.py's finish_standard_addition_session).
     """
     calibration_dir = data_dir / "derived" / "calibrations" / "standard_addition"
+
+    """
+    Applying the persisted ambient-covariate correction (if given) BEFORE
+    calibration, not after -- the correction works in millivolts, which is
+    the space `apply_calibration`'s own `b0`/`b1` inversion expects.
+
+    It has to be the reference-normalising variant, NOT
+    `apply_covariate_correction`. That one drives clean air to zero by
+    subtracting the whole predicted baseline, intercept included -- and
+    `apply_calibration` then subtracts `b0` again, biasing every
+    concentration low by `b0 / b1`. This function shipped with exactly
+    that bug; the constant offset was invisible in the benchmark that
+    validated it, because a constant shift cancels out of the derivative
+    that dynamics discovery fits, while still corrupting the absolute ppm
+    values and any nonlinear term fitted against them.
+
+    The reference conditions are the ones the calibration itself was
+    recorded at, which is what makes the two corrections compose: the
+    ambient model removes drift away from those conditions, and the
+    calibration then removes a baseline it measured under them.
+    """
+    voltage = readings["pid_voltage_mv"]
+    if ambient_baseline_run_id is not None:
+        covariate_models = load_covariate_models(
+            ambient_baseline_run_id, data_dir / "derived" / "diagnostics" / "ambient_baseline"
+        )
+        calibration_model = load_calibration(calibration_run_id, calibration_dir)[sensor_id]
+        corrected = normalise_to_reference_conditions(
+            readings,
+            covariate_models,
+            reference_rh_pct=calibration_model.mean_sample_rh_pct,
+            reference_t_c=calibration_model.mean_sample_t_c,
+        )
+        voltage = corrected["pid_voltage_mv_ambient_normalised"]
     ppm, ppm_stderr, _ = apply_calibration(
         voltage,
         sensor_id,
@@ -647,4 +681,7 @@ def discover_led_response_dynamics(
         metrics=result.metrics,
         coefficients={name: [float(c) for c in model.coefficients_] for name, model in result.models.items()},
         selected_features={name: list(model.selected_features_) for name, model in result.models.items()},
+        ppm_asgas_mean=float(readings["ppm_asgas"].mean()),
+        ppm_asgas_min=float(readings["ppm_asgas"].min()),
+        ppm_asgas_max=float(readings["ppm_asgas"].max()),
     )
