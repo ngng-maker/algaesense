@@ -174,20 +174,49 @@ def _write_row(data_dir: Path, campaign_id: str, index: int, point: np.ndarray, 
     pl.DataFrame([row]).write_parquet(campaign_dir / f"{experiment_id}.parquet")
 
 
-def adaptive_sequence(acquisition: str, seed: int, rng: np.random.Generator) -> np.ndarray:
+SOBOL_WARMUP = 24
+"""How many experiments the hybrid arm spends on Sobol before handing over
+to the active learner.
+
+Aimed squarely at the mechanism the two-factor study identified: D-optimal
+chooses the point that best sharpens the model it CURRENTLY believes, so
+while that model is still wrong it is sharpening the wrong thing. A
+space-filling warm-up buys a model worth optimising against before
+adaptivity starts. 24 is three times the shared seed and well short of the
+~100 where discovery becomes reachable, so the handover happens while
+there is still most of the campaign left for adaptivity to matter."""
+
+
+def adaptive_sequence(
+    acquisition: str, seed: int, rng: np.random.Generator, sobol_warmup: int = 0
+) -> np.ndarray:
     """Run the real active-learning loop to the cap and keep its order.
 
     Evaluating prefixes of that order is equivalent to stopping it early
     and costs one campaign instead of forty.
+
+    With `sobol_warmup` set, the first that-many experiments come from a
+    Sobol sequence instead of the learner, and the learner takes over
+    afterwards with those results already in hand. The shared seed is
+    unchanged either way, so the only thing that differs between this and
+    the plain adaptive arm is what happens between the seed and the
+    handover.
     """
     points = list(seed_points())
+    warmup_extra = max(sobol_warmup - N_SEED, 0)
+    if warmup_extra:
+        lo = [b[0] for b in BOUNDS]
+        hi = [b[1] for b in BOUNDS]
+        points += list(
+            qmc.scale(qmc.Sobol(d=4, scramble=True, seed=seed).random(warmup_extra), lo, hi)
+        )
     with tempfile.TemporaryDirectory() as tmp:
         data_dir = Path(tmp)
         campaign_id = f"disc4d_{abs(hash(acquisition)) % 9999}_{seed}"
         for index, point in enumerate(points):
             _write_row(data_dir, campaign_id, index, point, measure(point, rng))
 
-        for index in range(N_SEED, MAX_EXPERIMENTS):
+        for index in range(len(points), MAX_EXPERIMENTS):
             result = suggest_next_experiments(
                 campaign_id,
                 data_dir=data_dir,
@@ -244,12 +273,19 @@ METHOD_NAMES = [
     "Random",
     "D-optimal + labwiki",
     "Model-discrimination + labwiki",
+    "Sobol warm-up then D-optimal",
 ]
 
 ACQUISITION_BY_METHOD = {
     "D-optimal + labwiki": "d_optimal",
     "Model-discrimination + labwiki": "model_discrimination",
+    "Sobol warm-up then D-optimal": "d_optimal",
 }
+
+WARMUP_BY_METHOD = {"Sobol warm-up then D-optimal": SOBOL_WARMUP}
+"""Only the hybrid arm warms up. Everything else starts adapting straight
+after the shared seed, so the comparison isolates the warm-up rather than
+confounding it with the acquisition."""
 
 
 @dataclass
@@ -293,7 +329,9 @@ def _errors(model, rng: np.random.Generator) -> tuple[float, float]:
 def run_method(method: str, seed: int, verbose: bool = True) -> MethodResult:
     rng = np.random.default_rng(seed)
     sequence = (
-        adaptive_sequence(ACQUISITION_BY_METHOD[method], seed, rng)
+        adaptive_sequence(
+            ACQUISITION_BY_METHOD[method], seed, rng, WARMUP_BY_METHOD.get(method, 0)
+        )
         if method in ACQUISITION_BY_METHOD
         else None
     )
@@ -364,8 +402,8 @@ def _report(results: dict[str, list[MethodResult]], seeds: int) -> None:
         )
 
 
-PALETTE = ["#1f77b4", "#2ca02c", "#d62728", "#ff7f0e", "#17becf", "#9467bd"]
-MARKERS = ["o", "s", "^", "D", "P", "X"]
+PALETTE = ["#1f77b4", "#2ca02c", "#d62728", "#ff7f0e", "#17becf", "#9467bd", "#8c564b"]
+MARKERS = ["o", "s", "^", "D", "P", "X", "*"]
 
 
 def _plot(results: dict[str, list[MethodResult]], seeds: int) -> None:
