@@ -402,9 +402,17 @@ def run(seed: int = 0, verbose: bool = True) -> dict[str, StageResult]:
         in the gas and must survive, while one no other sensor corroborates
         is that instrument's own electrical fault. With a single sensor the
         two are indistinguishable and the function refuses to guess.
+
+        `min_event_samples=2` is opted into here rather than taken as a
+        default, because whether a real transient spans two samples or
+        twenty depends on the sampling interval. At the 10 s cadence used
+        throughout this benchmark, gas mixing and PID response time mean a
+        genuine excursion always covers several samples, while two
+        instruments glitching in the same single sample by chance is
+        exactly the failure this rules out.
         """
         despiked_frame = flag_glitches_across_sensors(
-            corrected_frame, value_column=corrected_column
+            corrected_frame, value_column=corrected_column, min_event_samples=2
         )
         despiked_ppm = _calibrate(despiked_frame, f"{corrected_column}_despiked")
 

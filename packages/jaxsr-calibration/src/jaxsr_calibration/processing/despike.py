@@ -38,6 +38,27 @@ inflate an ordinary sigma, making a large excursion look unremarkable
 against the noise floor it created."""
 
 
+def _within_run(mask: np.ndarray, min_length: int) -> np.ndarray:
+    """True only where `mask` is part of an unbroken run of at least
+    `min_length` samples."""
+    if min_length <= 1:
+        return mask.copy()
+
+    out = np.zeros_like(mask)
+    start = 0
+    while start < mask.size:
+        if not mask[start]:
+            start += 1
+            continue
+        stop = start
+        while stop < mask.size and mask[stop]:
+            stop += 1
+        if stop - start >= min_length:
+            out[start:stop] = True
+        start = stop
+    return out
+
+
 def flag_glitches_across_sensors(
     df: pl.DataFrame,
     *,
@@ -45,6 +66,8 @@ def flag_glitches_across_sensors(
     window: int = 11,
     z_threshold: float = 6.0,
     min_coincident_sensors: int = 2,
+    require_matching_sign: bool = True,
+    min_event_samples: int = 1,
 ) -> pl.DataFrame:
     """Classify sharp excursions as real events or per-sensor glitches.
 
@@ -58,6 +81,26 @@ def flag_glitches_across_sensors(
 
     Real events are left untouched in the despiked column, because they
     are signal.
+
+    Two further tests sharpen what counts as corroboration, because bare
+    simultaneity is weak evidence -- two instruments glitching in the same
+    sample by chance looks identical to a shared event, and over a long run
+    that will happen.
+
+    `require_matching_sign` only counts a neighbouring sensor as
+    corroborating when its excursion goes the SAME direction. A shared gas
+    event cannot push one sensor up while pushing another down, so an
+    opposite-signed neighbour is not evidence of anything. On by default:
+    it is a statement about physics rather than a tuning choice.
+
+    `min_event_samples` additionally requires the corroboration to persist
+    for that many consecutive samples. Gas has to mix and a PID has a
+    response time, so a real transient spans several samples at any
+    sensible sampling rate, while electrical glitches are usually one.
+    Defaults to 1 (off), because whether "several" means two samples or
+    twenty depends entirely on the sampling interval, and switching it on
+    by default would start deleting single-sample excursions this function
+    has always kept.
     """
 
     require_columns(df, _REQUIRED_COLUMNS | {value_column}, "flag_glitches_across_sensors")
@@ -119,19 +162,66 @@ def flag_glitches_across_sensors(
     before calling this is the straightforward fix, and doing it here
     would hide a real assumption inside a filter.
     """
+    flagged = flagged.with_columns(
+        pl.when(pl.col("is_outlier"))
+        .then(pl.col("local_residual").sign())
+        .otherwise(0.0)
+        .alias("outlier_direction")
+    )
+
     coincidence = flagged.group_by("timestamp").agg(
-        pl.col("is_outlier").sum().alias("n_coincident_sensors")
+        pl.col("is_outlier").sum().alias("n_outliers"),
+        (pl.col("outlier_direction") > 0).sum().alias("n_up"),
+        (pl.col("outlier_direction") < 0).sum().alias("n_down"),
     )
     flagged = flagged.join(coincidence, on="timestamp", how="left")
 
-    if coincidence_decidable:
-        is_glitch = pl.col("is_outlier") & (
-            pl.col("n_coincident_sensors") < min_coincident_sensors
+    if require_matching_sign:
+        n_coincident = (
+            pl.when(pl.col("outlier_direction") > 0)
+            .then(pl.col("n_up"))
+            .when(pl.col("outlier_direction") < 0)
+            .then(pl.col("n_down"))
+            .otherwise(0)
         )
+    else:
+        n_coincident = pl.col("n_outliers")
+
+    flagged = flagged.with_columns(n_coincident.alias("n_coincident_sensors")).drop(
+        "n_outliers", "n_up", "n_down"
+    )
+
+    if coincidence_decidable:
+        corroborated = pl.col("is_outlier") & (
+            pl.col("n_coincident_sensors") >= min_coincident_sensors
+        )
+    else:
+        corroborated = pl.col("is_outlier")
+
+    flagged = flagged.with_columns(corroborated.alias("_corroborated"))
+
+    """
+    The duration test runs per sensor over its own ordered samples, so a
+    run is a genuinely consecutive stretch of that instrument's readings
+    rather than an artifact of how the frame happens to be sorted.
+    """
+    sustained_frames = []
+    for (_,), sensor_df in flagged.partition_by("sensor_id", as_dict=True).items():
+        sensor_df = sensor_df.sort("timestamp")
+        sustained = _within_run(
+            sensor_df["_corroborated"].to_numpy().astype(bool), min_event_samples
+        )
+        sustained_frames.append(sensor_df.with_columns(pl.Series("_sustained", sustained)))
+    flagged = pl.concat(sustained_frames)
+
+    if coincidence_decidable:
+        is_glitch = pl.col("is_outlier") & ~pl.col("_sustained")
     else:
         is_glitch = pl.lit(False)
 
-    flagged = flagged.with_columns(is_glitch.alias("is_glitch"))
+    flagged = flagged.with_columns(is_glitch.alias("is_glitch")).drop(
+        "_corroborated", "_sustained"
+    )
 
     """
     Only glitches are replaced, and they are replaced by the sensor's own

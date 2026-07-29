@@ -22,6 +22,10 @@ BASE_TIME = dt.datetime(2026, 7, 27, 8, 0, 0, tzinfo=dt.timezone.utc)
 N = 200
 
 
+def _at(index: int) -> dt.datetime:
+    return BASE_TIME + dt.timedelta(seconds=300 * index)
+
+
 def _readings(
     sensor_ids: list[str],
     *,
@@ -124,6 +128,80 @@ def test_a_clean_recording_is_left_alone() -> None:
     assert out["pid_voltage_mv"].to_list() == pytest.approx(
         out["pid_voltage_mv_despiked"].to_list()
     )
+
+
+def test_opposite_signed_excursions_do_not_corroborate_each_other() -> None:
+    """Two sensors spiking at the same instant in OPPOSITE directions
+    cannot both be watching one gas event -- gas does not push one sensor
+    up while pushing another down. Without this, a chance collision of two
+    unrelated glitches reads as corroboration and both survive."""
+    df = _readings(["PID01", "PID02", "PID03"])
+
+    """One sensor jumps up, another jumps down, in the very same sample."""
+    index = 60
+    df = df.with_columns(
+        pl.when((pl.col("sensor_id") == "PID01") & (pl.col("timestamp") == _at(index)))
+        .then(pl.col("pid_voltage_mv") + 150.0)
+        .when((pl.col("sensor_id") == "PID02") & (pl.col("timestamp") == _at(index)))
+        .then(pl.col("pid_voltage_mv") - 150.0)
+        .otherwise(pl.col("pid_voltage_mv"))
+        .alias("pid_voltage_mv")
+    )
+
+    out = flag_glitches_across_sensors(df)
+    at_collision = out.filter(pl.col("timestamp") == _at(index))
+
+    assert at_collision.filter(pl.col("sensor_id") == "PID01")["is_glitch"].item() is True
+    assert at_collision.filter(pl.col("sensor_id") == "PID02")["is_glitch"].item() is True
+
+    """Turning the check off restores the old, weaker behaviour, which is
+    what makes this test about the check rather than about the data."""
+    lenient = flag_glitches_across_sensors(df, require_matching_sign=False)
+    assert not lenient.filter(pl.col("timestamp") == _at(index))["is_glitch"].any()
+
+
+def test_a_same_signed_collision_is_rejected_by_the_duration_test() -> None:
+    """Two sensors glitching upward in the same sample survive the sign
+    test, since nothing about their direction is contradictory. What gives
+    them away is that a real transient lasts longer than one sample."""
+    df = _readings(["PID01", "PID02", "PID03"])
+
+    index = 70
+    df = df.with_columns(
+        pl.when(pl.col("sensor_id").is_in(["PID01", "PID02"]) & (pl.col("timestamp") == _at(index)))
+        .then(pl.col("pid_voltage_mv") + 150.0)
+        .otherwise(pl.col("pid_voltage_mv"))
+        .alias("pid_voltage_mv")
+    )
+
+    single_sample = flag_glitches_across_sensors(df)
+    assert not single_sample.filter(pl.col("timestamp") == _at(index))["is_glitch"].any()
+
+    sustained = flag_glitches_across_sensors(df, min_event_samples=2)
+    at_collision = sustained.filter(pl.col("timestamp") == _at(index))
+    assert at_collision.filter(pl.col("sensor_id") == "PID01")["is_glitch"].item() is True
+    assert at_collision.filter(pl.col("sensor_id") == "PID02")["is_glitch"].item() is True
+
+
+def test_a_sustained_shared_event_survives_the_duration_test() -> None:
+    """The counterpart that matters more: an excursion lasting several
+    samples across every sensor is exactly what a real emission looks
+    like, and the duration test must not touch it."""
+    df = _readings(["PID01", "PID02", "PID03"])
+
+    span = list(range(80, 85))
+    df = df.with_columns(
+        pl.when(pl.col("timestamp").is_in([_at(i) for i in span]))
+        .then(pl.col("pid_voltage_mv") + 150.0)
+        .otherwise(pl.col("pid_voltage_mv"))
+        .alias("pid_voltage_mv")
+    )
+
+    out = flag_glitches_across_sensors(df, min_event_samples=2)
+    during_event = out.filter(pl.col("timestamp").is_in([_at(i) for i in span]))
+
+    assert during_event["is_outlier"].any(), "the excursion should still be detected"
+    assert not during_event["is_glitch"].any(), "but a sustained shared event is signal"
 
 
 def test_missing_required_column_is_rejected_clearly() -> None:
