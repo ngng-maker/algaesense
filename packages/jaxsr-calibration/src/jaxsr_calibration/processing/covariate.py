@@ -287,6 +287,65 @@ def apply_covariate_correction(df: pl.DataFrame, models: dict[str, CovariateMode
     return pl.concat(corrected_frames)
 
 
+def normalise_to_reference_conditions(
+    df: pl.DataFrame,
+    models: dict[str, CovariateModel],
+    reference_rh_pct: float,
+    reference_t_c: float,
+) -> pl.DataFrame:
+    """Remove the ambient VARIATION from each reading, leaving the sensor's
+    own baseline intact.
+
+    Use this when the result feeds `apply_calibration`; use
+    `apply_covariate_correction` when the result is being inspected on its
+    own.
+    """
+
+    """
+    The difference matters and is easy to get wrong.
+    `apply_covariate_correction` subtracts the whole predicted ambient
+    baseline, intercept included, so clean air lands near zero -- exactly
+    what a diagnostic wants. But a calibration's own `b0` is that same
+    zero offset, and `apply_calibration` subtracts it again, so composing
+    the two removes the baseline TWICE and biases every concentration low
+    by roughly `b0 / b1`.
+
+    Confirmed rather than reasoned about: a sensor with b0=55 mV and
+    b1=45 mV/ppm read 1.19 ppm low through the composed path, against
+    55/45 = 1.22 predicted by the double-subtraction.
+
+    Subtracting `predicted(RH, T) - predicted(RH_ref, T_ref)` instead
+    removes only the drift away from the reference conditions and leaves
+    the intercept where the calibration expects it. Pass the conditions
+    the calibration itself was recorded at.
+    """
+
+    require_columns(
+        df,
+        {"sensor_id", "sample_rh_pct", "sample_t_c", "pid_voltage_mv"},
+        "normalise_to_reference_conditions",
+    )
+
+    def _predicted(model: CovariateModel, rh, temp):
+        return model.alpha + model.beta_rh * rh + model.gamma_t * temp + model.delta_rh_t * (rh * temp)
+
+    normalised_frames = []
+    for (sensor_id,), sensor_df in df.partition_by("sensor_id", as_dict=True).items():
+        model = models.get(sensor_id)
+        if model is None or model.method not in ("ols", "robust"):
+            normalised = sensor_df["pid_voltage_mv"]
+        else:
+            drift = _predicted(model, sensor_df["sample_rh_pct"], sensor_df["sample_t_c"]) - _predicted(
+                model, reference_rh_pct, reference_t_c
+            )
+            normalised = sensor_df["pid_voltage_mv"] - drift
+        normalised_frames.append(
+            sensor_df.with_columns(normalised.alias("pid_voltage_mv_ambient_normalised"))
+        )
+
+    return pl.concat(normalised_frames)
+
+
 def persist_covariate_models(
     models: dict[str, CovariateModel],
     ambient_baseline_run_id: str,
