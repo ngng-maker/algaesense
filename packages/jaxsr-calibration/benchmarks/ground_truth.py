@@ -973,3 +973,80 @@ def true_voc_ppm_4d(par, temp, ph, nutrient):
     ph_term = -PH_K * (ph - PH_OPT) ** 2
     nutrient_term = NUTRIENT_VMAX * nutrient / (NUTRIENT_K_M + nutrient)
     return true_voc_ppm(par, temp) + ph_term + nutrient_term
+
+
+# ------------------------------------------------- smooth four-factor truth
+
+"""
+A second four-factor truth, differing from `true_voc_ppm_4d` in one
+respect that matters for what active learning is actually good at.
+
+Adaptive design assumes the response is SMOOTH -- it fits a model to what
+it has seen and chooses the next point from that model, which is only
+sound if the response has no kinks for the model to be blindsided by. The
+photoinhibition term inherited from the two-factor truth,
+`max(par - 380, 0)^2`, is continuous and has a continuous first
+derivative but a DISCONTINUOUS second derivative at the threshold, and it
+is identically zero across 90% of the light range. Measured, not assumed.
+
+Haldane substrate-inhibition kinetics replaces it:
+
+    VMAX * par / (K_M + par + par^2 / K_I)
+
+which is the standard model for photoinhibition in the first place, is
+infinitely differentiable for par >= 0, and declines at high light for
+the same physical reason. Its peak sits at sqrt(K_M * K_I), so K_I is
+chosen to put that peak where the hinged version's threshold was.
+
+This also creates a better discrimination test than the hinge did. The
+non-inhibited Monod form `par / (K_M + par)` is now available as a decoy,
+and it is indistinguishable from Haldane unless the campaign samples high
+light -- so "did you look where the response turns over" becomes a
+question about the shape of a smooth curve rather than about finding a
+kink.
+"""
+
+HALDANE_PEAK_PAR = 300.0
+HALDANE_K_I = HALDANE_PEAK_PAR**2 / K_M
+"""Haldane peaks at sqrt(K_M * K_I). Placed at 300 against a light range
+running to 500, so 42% of the range lies past the turnover.
+
+That fraction is the whole difficulty of the test and was chosen by
+measurement, not taste. With the turnover at 400 and the range ending at
+420, only 5% of the range showed any decline and the non-inhibited Monod
+form correlated 0.984 with the true one -- indistinguishable in practice,
+which would have made discovery an unwinnable question dressed up as a
+hard one. At 300/500 that correlation is 0.911: still demanding, since a
+campaign confined to low light genuinely cannot tell the two apart, but
+answerable by one that looks past the peak."""
+
+
+def haldane_light(par):
+    """Light response with smooth photoinhibition built in."""
+    par = np.asarray(par, dtype=float)
+    return VMAX * par / (K_M + par + par**2 / HALDANE_K_I)
+
+
+def true_voc_ppm_4d_smooth(par, temp, ph, nutrient):
+    """The four-factor truth with every term infinitely differentiable.
+
+        VOC = BASELINE
+            + haldane_light(par)                            [light, with turnover]
+            + TEMP_SLOPE * (temp - TEMP_REF)                [temperature]
+            + GAMMA * par * (temp - TEMP_REF)               [light x temperature]
+            - PH_K * (ph - PH_OPT)^2                        [pH optimum]
+            + NUTRIENT_VMAX * nut / (NUTRIENT_K_M + nut)    [nitrate saturation]
+    """
+    par = np.asarray(par, dtype=float)
+    temp = np.asarray(temp, dtype=float)
+    ph = np.asarray(ph, dtype=float)
+    nutrient = np.asarray(nutrient, dtype=float)
+
+    return (
+        BASELINE
+        + haldane_light(par)
+        + TEMP_SLOPE * (temp - TEMP_REF)
+        + GAMMA * par * (temp - TEMP_REF)
+        - PH_K * (ph - PH_OPT) ** 2
+        + NUTRIENT_VMAX * nutrient / (NUTRIENT_K_M + nutrient)
+    )
