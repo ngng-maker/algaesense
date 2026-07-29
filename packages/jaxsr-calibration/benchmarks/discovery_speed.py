@@ -156,12 +156,25 @@ def _staged(round_num: int) -> str:
     return "model_discrimination" if round_num < STAGE_SWITCH_ROUND else "d_optimal"
 
 
+def _staged_reversed(round_num: int) -> str:
+    """The opposite order, and arguably the better-motivated one.
+
+    Discriminating first assumes several candidate forms are worth telling
+    apart -- but after a handful of points every candidate is poor, so
+    "where do they disagree" is mostly noise. Sharpening first buys
+    coverage and sane coefficients, which is what makes the later
+    discrimination question meaningful.
+    """
+    return "d_optimal" if round_num < STAGE_SWITCH_ROUND else "model_discrimination"
+
+
 ACQUISITION_BY_METHOD = {
     "UCB": "ucb",
     "D-optimal": "d_optimal",
     "Model-discrimination": "model_discrimination",
     "Blend (D-opt + discrim)": "0.5*d_optimal+0.5*model_discrimination",
     "Staged (discrim then D-opt)": _staged,
+    "Staged (D-opt then discrim)": _staged_reversed,
 }
 """Every 'ours' variant is run twice, with and without labwiki, so the
 acquisition and the knowledge base can be told apart. The blend is
@@ -375,9 +388,30 @@ def run(seeds: int = 8, verbose: bool = True) -> dict[str, list[MethodResult]]:
             print(f"\nseed {seed}:")
         for method in METHOD_NAMES:
             results[method].append(run_method(method, seed, verbose=verbose))
+    _save_raw(results)
     _report(results, seeds)
     _plot(results, seeds)
     return results
+
+
+def _save_raw(results: dict[str, list[MethodResult]]) -> None:
+    """Write every individual run's outcome, not just the summary.
+
+    Learned the hard way: a head-to-head run was launched with verbose
+    off, which suppressed the per-seed lines, and the summary alone cannot
+    say whether a two-experiment gap between two methods is real. The
+    spread is the whole answer when the differences are this small, so it
+    gets persisted rather than printed.
+    """
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    lines = ["method,seed,experiments_to_discovery,surface_rmse,extrapolation_rmse"]
+    for method, runs in results.items():
+        for seed, run in enumerate(runs):
+            found = "" if run.experiments_to_discovery is None else run.experiments_to_discovery
+            lines.append(
+                f"{method},{seed},{found},{run.surface_rmse_at_end:.4f},{run.extrapolation_rmse_at_end:.4f}"
+            )
+    (RESULTS_DIR / "discovery_speed_runs.csv").write_text("\n".join(lines) + "\n")
 
 
 def _summarise(runs: list[MethodResult]) -> tuple[float | None, int, int]:
@@ -395,25 +429,30 @@ def _report(results: dict[str, list[MethodResult]], seeds: int) -> None:
     print(f"Experiments needed to discover the true equation ({seeds} repeats)")
     print("=" * 78)
     ordered = sorted(
-        METHOD_NAMES,
+        list(results),
         key=lambda m: (_summarise(results[m])[0] is None, _summarise(results[m])[0] or 1e9),
     )
     for method in ordered:
         median, n_hit, n_total = _summarise(results[method])
         runs = results[method]
+        found = [r.experiments_to_discovery for r in runs if r.experiments_to_discovery is not None]
+        spread = (
+            f"sd {float(np.std(found, ddof=1)):4.1f}" if len(found) > 1 else "sd    -"
+        )
         surface = float(np.median([r.surface_rmse_at_end for r in runs]))
         extrap = float(np.median([r.extrapolation_rmse_at_end for r in runs]))
         shown = f"{median:.0f}" if median is not None else "never"
         print(
-            f"  {method:32s} {shown:>6s} experiments   converged {n_hit}/{n_total}   "
-            f"surface {surface:6.2f} ppm   extrapolation {extrap:7.2f} ppm"
+            f"  {method:40s} med {shown:>5s}  mean {np.mean(found) if found else float('nan'):5.1f}  "
+            f"{spread}  converged {n_hit}/{n_total}   "
+            f"surface {surface:5.2f}   extrap {extrap:6.2f} ppm"
         )
 
 
 CLASSICAL_COLOURS = ["#1f77b4", "#2ca02c", "#d62728", "#ff7f0e"]
-ACQUISITION_COLOURS = ["#9467bd", "#17becf", "#8c564b", "#e377c2", "#7f7f7f"]
+ACQUISITION_COLOURS = ["#9467bd", "#17becf", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22"]
 CLASSICAL_MARKERS = ["o", "s", "^", "D"]
-ACQUISITION_MARKERS = ["v", "P", "X", "*", "h"]
+ACQUISITION_MARKERS = ["v", "P", "X", "*", "h", "<"]
 
 """
 Colour carries the METHOD and line style carries whether labwiki was
