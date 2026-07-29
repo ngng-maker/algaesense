@@ -105,6 +105,18 @@ def build_basis_library() -> jaxsr.BasisLibrary:
     saturating response from a straight line is the genuine experimental
     question, and a campaign that never samples low light cannot answer
     it.
+
+    `inv_par` (1/(1+light)) was REMOVED after the first run, and how it got
+    in is the more useful lesson. It measured 0.899 against the true
+    Haldane term, just under the 0.9 screening cut-off, so it was kept --
+    but a fixed correlation threshold answers the wrong question. The
+    question is whether ANY design can exclude the decoy at realistic
+    noise, and the first run showed none could: Sobol and Latin Hypercube
+    found every true term at every budget from 40 to 160 experiments and
+    failed strict discovery solely by also carrying this one, while
+    posting the best prediction errors of any method. That is an
+    unwinnable question, not a distractor. Screen decoys by whether a
+    well-resourced design can reject them, not by a number.
     """
     return (
         jaxsr.BasisLibrary(n_features=4)
@@ -127,7 +139,6 @@ def build_basis_library() -> jaxsr.BasisLibrary:
         .add_custom("par_hump", lambda X: (X[:, 0] - PAR_MID) ** 2, complexity=3, feature_indices=(0,))
         .add_custom("temp_hump", lambda X: (X[:, 1] - TEMP_REF) ** 2, complexity=3, feature_indices=(1,))
         .add_custom("nut_hump", lambda X: (X[:, 3] - NUT_MID) ** 2, complexity=3, feature_indices=(3,))
-        .add_custom("inv_par", lambda X: 1.0 / (1.0 + X[:, 0]), complexity=3, feature_indices=(0,))
     )
 
 
@@ -292,6 +303,16 @@ confounding it with the acquisition."""
 class MethodResult:
     method: str
     experiments_to_discovery: int | None
+    experiments_to_full_recall: int | None
+    """When every true term was present, decoys tolerated.
+
+    Reported beside strict discovery because the first four-factor run is
+    the case that proves they are different claims: every method except
+    Random reached full recall throughout while two of them scored zero on
+    the strict measure. Quoting only the strict number inverted the
+    ranking.
+    """
+
     surface_rmse: float
     extrapolation_rmse: float
 
@@ -304,6 +325,10 @@ def _fit(points: np.ndarray, values: np.ndarray):
 
 def _discovered(model) -> bool:
     return frozenset(getattr(model, "selected_features_", ())) == TRUE_TERM_SET
+
+
+def _full_recall(model) -> bool:
+    return TRUE_TERM_SET <= frozenset(getattr(model, "selected_features_", ()))
 
 
 def _errors(model, rng: np.random.Generator) -> tuple[float, float]:
@@ -337,13 +362,19 @@ def run_method(method: str, seed: int, verbose: bool = True) -> MethodResult:
     )
 
     discovery_n: int | None = None
+    recall_n: int | None = None
     consecutive = 0
+    consecutive_recall = 0
     model = None
 
     for n in range(MIN_EXPERIMENTS, MAX_EXPERIMENTS + 1, EVAL_STEP):
         points = sequence[:n] if sequence is not None else fixed_design(method, n, seed)
         values = np.array([measure(p, rng) for p in points])
         model = _fit(points, values)
+
+        consecutive_recall = consecutive_recall + 1 if _full_recall(model) else 0
+        if recall_n is None and consecutive_recall >= HOLD_ROUNDS:
+            recall_n = n - (HOLD_ROUNDS - 1) * EVAL_STEP
 
         consecutive = consecutive + 1 if _discovered(model) else 0
         if consecutive >= HOLD_ROUNDS:
@@ -353,10 +384,11 @@ def run_method(method: str, seed: int, verbose: bool = True) -> MethodResult:
     surface, extrapolation = _errors(model, rng)
     if verbose:
         print(
-            f"  {method:34s} discovered at {discovery_n or '>' + str(MAX_EXPERIMENTS):>5}   "
+            f"  {method:34s} exact at {discovery_n or '>' + str(MAX_EXPERIMENTS):>5}   "
+            f"all-true at {recall_n or '-':>5}   "
             f"surface {surface:6.2f}  extrap {extrapolation:7.2f} ppm"
         )
-    return MethodResult(method, discovery_n, surface, extrapolation)
+    return MethodResult(method, discovery_n, recall_n, surface, extrapolation)
 
 
 def run(seeds: int = 6, verbose: bool = True) -> dict[str, list[MethodResult]]:
@@ -374,12 +406,14 @@ def run(seeds: int = 6, verbose: bool = True) -> dict[str, list[MethodResult]]:
 
 def _save_raw(results: dict[str, list[MethodResult]]) -> None:
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    lines = ["method,seed,experiments_to_discovery,surface_rmse,extrapolation_rmse"]
+    lines = ["method,seed,experiments_to_discovery,experiments_to_full_recall,surface_rmse,extrapolation_rmse"]
     for method, runs in results.items():
         for seed, run_result in enumerate(runs):
             found = "" if run_result.experiments_to_discovery is None else run_result.experiments_to_discovery
+            recall = "" if run_result.experiments_to_full_recall is None else run_result.experiments_to_full_recall
             lines.append(
-                f"{method},{seed},{found},{run_result.surface_rmse:.4f},{run_result.extrapolation_rmse:.4f}"
+                f"{method},{seed},{found},{recall},"
+                f"{run_result.surface_rmse:.4f},{run_result.extrapolation_rmse:.4f}"
             )
     (RESULTS_DIR / "discovery_4d_runs.csv").write_text("\n".join(lines) + "\n")
 
@@ -393,10 +427,13 @@ def _report(results: dict[str, list[MethodResult]], seeds: int) -> None:
     for method in METHOD_NAMES:
         runs = results[method]
         found = [r.experiments_to_discovery for r in runs if r.experiments_to_discovery is not None]
+        recalled = [r.experiments_to_full_recall for r in runs if r.experiments_to_full_recall is not None]
         shown = f"{np.mean(found):.1f}" if found else "never"
         sd = f"{np.std(found, ddof=1):4.1f}" if len(found) > 1 else "   -"
+        recall_shown = f"{len(recalled):2d}/{len(runs):2d} @ {np.mean(recalled):5.1f}" if recalled else f" 0/{len(runs):2d}      "
         print(
-            f"  {method:34s} converged {len(found):2d}/{len(runs):2d}   mean {shown:>6s}  sd {sd}   "
+            f"  {method:34s} exact {len(found):2d}/{len(runs):2d} @ {shown:>6s} sd {sd}   "
+            f"all-true {recall_shown}   "
             f"surface {np.median([r.surface_rmse for r in runs]):6.2f}   "
             f"extrap {np.median([r.extrapolation_rmse for r in runs]):7.2f} ppm"
         )
