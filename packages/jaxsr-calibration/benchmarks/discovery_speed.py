@@ -202,6 +202,47 @@ LABWIKI_NOTE_TEXT = (
 LABWIKI_BOUND_OVERRIDE = {"par_umol_m2_s": (40.0, 380.0)}
 
 
+SEED_VARIANTS = {
+    "clustered": [(190.0, 28.0), (230.0, 28.0), (190.0, 31.0), (230.0, 31.0)],
+    "spread": [(40.0, 22.0), (400.0, 22.0), (40.0, 38.0), (400.0, 38.0)],
+    "latin": [(87.5, 27.5), (182.5, 37.5), (277.5, 22.5), (372.5, 32.5)],
+}
+"""How a campaign's first four runs are laid out before any method takes
+over. The clustered variant is what a cautious operator actually does --
+a few runs near a setting they already trust. The spread variant is four
+runs at the corners of the declared envelope.
+
+The `latin` variant is the hypothesis this study exists to test: four
+points that span both factors like `spread` does, but placed on a Latin
+square so they cover the INTERIOR rather than sitting on the corners.
+Corners tell you the extremes and nothing about the shape between them,
+which is a plausible reason the corners-only seed left D-optimal
+converging in only half its runs while Latin Hypercube and Sobol -- which
+cover the interior by construction -- converged every time.
+
+This is not a cosmetic difference for the adaptive methods. Their search
+range defaults to the range of data observed so far, so a clustered seed
+boxes them in at PAR 190-230 until something explicitly widens it, while
+a spread seed hands them the full range from the start -- which may make
+labwiki's declared bounds redundant rather than essential.
+"""
+
+
+def set_seed_points(variant: str) -> None:
+    """Point every method at the same starting layout.
+
+    Patches the shared module the campaign runner reads too, so the
+    adaptive and fixed designs cannot silently disagree about where the
+    campaign began -- which would confound the seed with the method.
+    """
+    import doe_methods
+
+    points = SEED_VARIANTS[variant]
+    doe_methods.SEED_POINTS[:] = points
+    global SEED_POINTS
+    SEED_POINTS = doe_methods.SEED_POINTS
+
+
 def measure(par: float, temp: float, rng: np.random.Generator) -> float:
     """One experiment: run this condition, get back its VOC plateau."""
     return float(true_voc_ppm(par, temp) + rng.normal(0.0, MEASUREMENT_NOISE_PPM))
