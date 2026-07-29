@@ -26,7 +26,7 @@ being cheap.
 - Linear PAR (0.953 vs `sat_par`) is deliberately KEPT â€” it is the real
   experimental question, not an artifact.
 
-## Smoothness — why the truth changed
+## Smoothness ï¿½ why the truth changed
 
 Active learning assumes a SMOOTH response: it fits a model to what it has
 seen and picks the next point from that model, which is only sound if
@@ -109,11 +109,49 @@ True term set in the fitted basis (7 terms):
 - `MAX_EXPERIMENTS = 200`, `MIN_EXPERIMENTS = 20` (7 terms cannot be
   determined below that).
 
+## THE FIRST 4D RUN IS NOT USABLE -- read before trusting it
+
+Raw result (6 repeats): Latin Hypercube 0/6, Sobol 0/6, Grid 6/6 at 32.7,
+Random 1/6, D-optimal+labwiki 6/6 at 32.0, model-discrimination 6/6 at
+39.3, Sobol-warmup-then-D-optimal 5/6 at 80.8.
+
+**That headline is an artifact.** Diagnosed by printing the selected terms
+rather than trusting the score: Sobol and Latin Hypercube find EVERY true
+term at every budget from 40 to 160 experiments. They never miss one. They
+fail only because they persistently also select `inv_par`, the
+`1/(1+light)` decoy -- and no amount of extra data removes it. Their
+prediction errors give it away: Sobol scores the best surface (0.20 ppm)
+and best extrapolation (0.26 ppm) of any method while nominally having
+failed outright.
+
+`inv_par` measured 0.899 against the true Haldane term, just under the 0.9
+cut-off, so it was kept. That was the wrong instrument. A fixed
+correlation threshold does not answer the real question, which is whether
+ANY design can exclude the decoy at realistic noise. Same trap as the
+first 4D attempt where `temp^2` sat at 0.996 -- moving the threshold from
+0.95 to 0.9 simply let a decoy through underneath it.
+
+Grid escapes only because its coarse 3-4 levels per factor give it less
+resolution at low light, which is where `inv_par` and Haldane differ. It
+is passing for the wrong reason.
+
+### Required before re-running
+
+1. **Drop `inv_par`** -- justified by evidence (no design excluded it at any
+   budget), not by a threshold.
+2. **Report recall beside strict discovery.** "Found every true term" and
+   "found every true term and nothing else" are different claims, and this
+   run is the case that proves conflating them misleads: every method
+   except Random had perfect recall throughout.
+3. Re-screen any remaining decoy the same way -- by asking whether a
+   well-resourced design can actually reject it, not by its correlation.
+
 ## Status
 
 - [x] 4D ground truth committed
 - [x] decoys screened, recoverability confirmed
 - [x] campaign runner generalised to N factors (self-contained in discovery_speed_4d.py)
 - [x] truth made smooth (Haldane), decoys re-screened, recoverability re-confirmed
-- [ ] 4D run executed
+- [x] 4D run executed -- RESULT NOT USABLE, see section above
+- [ ] inv_par removed, recall metric added, run repeated
 - [ ] results verified and reported
