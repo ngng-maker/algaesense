@@ -109,7 +109,7 @@ True term set in the fitted basis (7 terms):
 - `MAX_EXPERIMENTS = 200`, `MIN_EXPERIMENTS = 20` (7 terms cannot be
   determined below that).
 
-## THE FIRST 4D RUN IS NOT USABLE -- read before trusting it
+## SUPERSEDED: the FIRST 4D run was not usable (kept for the lesson)
 
 Raw result (6 repeats): Latin Hypercube 0/6, Sobol 0/6, Grid 6/6 at 32.7,
 Random 1/6, D-optimal+labwiki 6/6 at 32.0, model-discrimination 6/6 at
@@ -153,5 +153,40 @@ is passing for the wrong reason.
 - [x] campaign runner generalised to N factors (self-contained in discovery_speed_4d.py)
 - [x] truth made smooth (Haldane), decoys re-screened, recoverability re-confirmed
 - [x] 4D run executed -- RESULT NOT USABLE, see section above
-- [ ] inv_par removed, recall metric added, run repeated
-- [ ] results verified and reported
+- [x] inv_par removed, recall metric added, run repeated
+- [x] results verified and reported
+
+## FINAL 4D RESULT (6 repeats, inv_par removed, both metrics)
+
+Exact structural discovery, then all-true recall:
+
+  Grid                            exact 6/6 @ 30.0 (sd  8.7)   all-true 6/6 @ 21.3
+  Model-discrimination + labwiki  exact 6/6 @ 37.3 (sd  9.4)   all-true 6/6 @ 20.0
+  D-optimal + labwiki             exact 6/6 @ 39.3 (sd 21.2)   all-true 6/6 @ 20.7
+  Sobol warm-up then D-optimal    exact 6/6 @ 72.0 (sd 37.9)   all-true 6/6 @ 24.0
+  Random                          exact 3/6 @ 40.0 (sd 20.0)   all-true 6/6 @ 25.3
+  Latin Hypercube                 exact 1/6 @ 48.0             all-true 6/6 @ 26.0
+  Sobol                           exact 0/6                    all-true 6/6 @ 25.3
+
+Prediction error (surface / extrapolation, ppm): Sobol 0.19/0.33 is the
+BEST of any method despite scoring 0/6 on exact discovery.
+
+### What is and is not supported
+
+SUPPORTED -- convergence rate differs, decisively. 6/6 for Grid and all
+three adaptive arms against 0/6 Sobol, 1/6 Latin Hypercube, 3/6 Random.
+This reverses every two-factor result and is far too large to be noise.
+
+SUPPORTED -- the Sobol warm-up hybrid costs more than it saves: 72.0
+experiments against 39.3 for plain D-optimal, the only gap wide enough to
+clear the scatter.
+
+NOT SUPPORTED -- any ordering among the converging methods. Grid 30.0 and
+D-optimal 39.3 carry standard deviations of 8.7 and 21.2 across six
+repeats. Do not rank these without many more repeats.
+
+NOT SUPPORTED -- "adaptive design learns the relationship faster". Every
+method reached all-true recall in 20-26 experiments with no separation.
+What differs is PARSIMONY: whether a method also drags along a wrong
+light-response term (x0 or sat_par). That is a narrower and more accurate
+claim than the convergence counts alone suggest.
