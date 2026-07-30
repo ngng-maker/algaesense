@@ -257,6 +257,7 @@ def suggest_next_experiments(
     n_points: int = 3,
     kappa: float = 2.0,
     acquisition: str = "ucb",
+    basis_library=None,
     max_terms: int = 5,
     search_bounds: dict[str, tuple[float, float]] | None = None,
     bound_overrides: dict[str, tuple[float, float]] | None = None,
@@ -307,7 +308,16 @@ def suggest_next_experiments(
         features_df, target=target, feature_columns=feature_columns, include_categorical=False
     )
 
-    library = default_basis_library(n_features=X.shape[1])
+    """
+    The caller may supply the candidate shapes the learner reasons over.
+    This matters more than it looks: an information-seeking acquisition
+    picks the point that best sharpens the model it CURRENTLY holds, so if
+    that model is a generic polynomial and the real response is a
+    saturating or inhibited form, the learner is optimising for a model
+    class that cannot represent the truth at all. Defaults to the
+    generic degree-2 library so existing callers are unaffected.
+    """
+    library = basis_library or default_basis_library(n_features=X.shape[1])
     model = jaxsr.SymbolicRegressor(basis_library=library, max_terms=max_terms)
     model.fit(X, y)
 

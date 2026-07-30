@@ -190,3 +190,49 @@ method reached all-true recall in 20-26 experiments with no separation.
 What differs is PARSIMONY: whether a method also drags along a wrong
 light-response term (x0 or sat_par). That is a narrower and more accurate
 claim than the convergence counts alone suggest.
+
+## STOP — a fourth confound, and the one that drives the reported numbers
+
+`jaxsr.SymbolicRegressor` defaults to `strategy='greedy_forward'`. Every fit
+in every run of this benchmark family has used it, and the discovery
+criterion measures WHICH TERMS GET SELECTED -- so the design comparison has
+been measuring greedy selection's failure, not the designs.
+
+Measured directly on Sobol at 48 experiments, identical data:
+
+    greedy_forward + bic : exact=False, extra=['sat_par']
+    greedy_forward + aic : exact=False, extra=['sat_par']
+    exhaustive     + bic : exact=True
+    exhaustive     + aic : exact=True
+
+The information criterion changes nothing. The search strategy changes
+everything. So "Sobol 0/6" was greedy selection failing on data that fully
+determined the answer.
+
+This project already learned this: the 2026-07-23 dev log records switching
+`discover_dynamics` from greedy_forward to exhaustive, which tripled R^2 and
+recovered a term greedy had been missing. It was not carried across.
+
+### Required next, in order
+
+1. Set `strategy="exhaustive"` on EVERY fit -- both `_fit` (scoring) and the
+   learner's internal model via `suggest_next_experiments`. Check
+   tractability first: 11 basis terms choose up to 8 should be fine, but
+   confirm rather than assume.
+2. Re-run. Recorded expectation so it can be checked against: the
+   space-filling designs will converge, and the four-factor result will look
+   much less like an adaptive-design win than currently reported.
+3. Only then interpret the AdaptiveSampler (leverage/gradient) and
+   Box-Behnken/central-composite arms -- their numbers carry the same
+   confound.
+
+### Full list of confounds found in the 4D work, all still to be cleared
+
+- Learner reasoned over a degree-2 polynomial surrogate that cannot
+  represent Haldane, the pH quadratic, or Monod nitrate. FIXED (basis_library
+  parameter added), not yet re-run.
+- Baselines were scipy reimplementations while jaxsr ships its own samplers
+  AND the real classical designs. FIXED, not yet re-run.
+- `jaxsr.AdaptiveSampler` (leverage, gradient strategies) was never used.
+  ADDED, not yet run.
+- Term selection defaulted to greedy_forward. NOT YET FIXED -- do this first.

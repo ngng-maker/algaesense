@@ -235,8 +235,9 @@ def adaptive_sequence(
                 feature_columns=FACTORS,
                 n_points=1,
                 acquisition=acquisition,
-                max_terms=6,
+                max_terms=MAX_TERMS,
                 search_bounds=DECLARED_SEARCH_BOUNDS,
+                basis_library=build_basis_library(),
             )
             point = np.array([result.points[0][name] for name in FACTORS])
             _write_row(data_dir, campaign_id, index, point, measure(point, rng))
@@ -244,7 +245,58 @@ def adaptive_sequence(
     return np.array(points)
 
 
+def sampler_sequence(strategy: str, seed: int, rng: np.random.Generator) -> np.ndarray:
+    """jaxsr's purpose-built AdaptiveSampler, rather than the
+    ActiveLearner + acquisition-function route.
+
+    Used because it offers strategies with no equivalent in the
+    acquisition set: `leverage` picks points with high influence on the
+    fit, and `gradient` picks where the response changes fastest -- which
+    is exactly where a saturating curve's turnover lives, and therefore
+    where the evidence distinguishing Haldane from plain Monod sits.
+
+    Driven directly rather than through `suggest_next_experiments`, since
+    the production pipeline only exposes the acquisition route. That makes
+    this arm a comparison against the library's capability, not against
+    this project's current wiring -- worth stating, because a win here is
+    an argument for extending the pipeline rather than a result the
+    pipeline already delivers.
+    """
+    points = list(seed_points())
+    values = [measure(p, rng) for p in points]
+
+    while len(points) < MAX_EXPERIMENTS:
+        model = _fit(np.array(points), np.array(values))
+        sampler = jaxsr.AdaptiveSampler(
+            model=model, bounds=BOUNDS, strategy=strategy, batch_size=1, random_state=seed
+        )
+        result = sampler.suggest(n_points=1)
+        suggested = np.asarray(getattr(result, "points", result), dtype=float).reshape(-1, 4)
+        for point in suggested:
+            points.append(np.asarray(point, dtype=float))
+            values.append(measure(np.asarray(point, dtype=float), rng))
+    return np.array(points)
+
+
 def fixed_design(method: str, n: int, seed: int) -> np.ndarray:
+    """Non-adaptive designs, now taken from jaxsr's own sampling module
+    rather than reimplemented.
+
+    An earlier version rebuilt Sobol and Latin hypercube with
+    scipy.stats.qmc and hand-rolled a grid, while the library ships
+    `sobol_sample`, `latin_hypercube_sample`, `grid_sample` -- and, more
+    importantly, the actual classical designs an experimentalist reaches
+    for on a four-factor screening study: Box-Behnken and central
+    composite. Comparing adaptive design against a reimplementation of
+    textbook methods, when the textbook methods were available, was
+    overclaiming.
+
+    Box-Behnken and central composite are FIXED size for a given factor
+    count -- you cannot ask them for n points. Reaching a larger budget by
+    replicating the whole design is what is actually done in practice
+    (replicates average down noise), so that is what happens here, and the
+    natural design size is reported in the notes.
+    """
     """A non-adaptive design of size n, regenerated per size -- which is
     how these are genuinely used: commit to a budget, lay out the design,
     run it."""
@@ -253,9 +305,18 @@ def fixed_design(method: str, n: int, seed: int) -> np.ndarray:
     hi = [b[1] for b in BOUNDS]
 
     if method == "Latin Hypercube":
-        extra = qmc.scale(qmc.LatinHypercube(d=4, seed=seed).random(n_extra), lo, hi)
+        extra = np.asarray(jaxsr.latin_hypercube_sample(n_extra, BOUNDS, random_state=seed))
     elif method == "Sobol":
-        extra = qmc.scale(qmc.Sobol(d=4, scramble=True, seed=seed).random(n_extra), lo, hi)
+        extra = np.asarray(jaxsr.sobol_sample(n_extra, BOUNDS, random_state=seed))
+    elif method in ("Box-Behnken", "Central composite"):
+        base = (
+            jaxsr.box_behnken_design(4, center_points=3, bounds=BOUNDS)
+            if method == "Box-Behnken"
+            else jaxsr.central_composite_design(4, center_points=3, bounds=BOUNDS)
+        )
+        base = np.asarray(base, dtype=float)
+        repeats = int(np.ceil(n_extra / len(base)))
+        extra = np.vstack([base] * repeats)[:n_extra]
     elif method == "Random":
         rng = np.random.default_rng(seed)
         extra = np.column_stack([rng.uniform(a, b, n_extra) for a, b in BOUNDS])
@@ -280,12 +341,26 @@ def fixed_design(method: str, n: int, seed: int) -> np.ndarray:
 METHOD_NAMES = [
     "Latin Hypercube",
     "Sobol",
-    "Grid",
-    "Random",
+    "Box-Behnken",
+    "Central composite",
     "D-optimal + labwiki",
     "Model-discrimination + labwiki",
-    "Sobol warm-up then D-optimal",
+    "AdaptiveSampler leverage",
+    "AdaptiveSampler gradient",
 ]
+"""Grid and Random are dropped to keep the run tractable: Box-Behnken and
+central composite are the designs an experimentalist would actually use on
+four factors, and both dominated the hand-rolled grid's purpose."""
+
+SAMPLER_STRATEGY_BY_METHOD = {
+    "AdaptiveSampler leverage": "leverage",
+    "AdaptiveSampler gradient": "gradient",
+}
+"""jaxsr ships a purpose-built AdaptiveSampler alongside the
+acquisition-function route, and these two strategies have no equivalent in
+what was tested before: `leverage` targets points with high influence on
+the fit, `gradient` targets where the response changes fastest -- which is
+exactly where a saturating curve's turnover lives."""
 
 ACQUISITION_BY_METHOD = {
     "D-optimal + labwiki": "d_optimal",
@@ -353,13 +428,14 @@ def _errors(model, rng: np.random.Generator) -> tuple[float, float]:
 
 def run_method(method: str, seed: int, verbose: bool = True) -> MethodResult:
     rng = np.random.default_rng(seed)
-    sequence = (
-        adaptive_sequence(
+    if method in SAMPLER_STRATEGY_BY_METHOD:
+        sequence = sampler_sequence(SAMPLER_STRATEGY_BY_METHOD[method], seed, rng)
+    elif method in ACQUISITION_BY_METHOD:
+        sequence = adaptive_sequence(
             ACQUISITION_BY_METHOD[method], seed, rng, WARMUP_BY_METHOD.get(method, 0)
         )
-        if method in ACQUISITION_BY_METHOD
-        else None
-    )
+    else:
+        sequence = None
 
     discovery_n: int | None = None
     recall_n: int | None = None
